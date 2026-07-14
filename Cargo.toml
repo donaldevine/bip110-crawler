@@ -1,0 +1,26 @@
+[package]
+name = "bip110-crawler"
+version = "0.1.0"
+edition = "2021"
+description = "Crawls the Bitcoin P2P network starting from your own node, records implementation/version, block-version BIP-110 signalling, and renders an interactive report."
+license = "MIT"
+
+[[bin]]
+name = "bip110-crawler"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sha3 = "0.10"
+rand = "0.8"
+ureq = { version = "2", features = ["json"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+tiny_http = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = true

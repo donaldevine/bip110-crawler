@@ -1,0 +1,23 @@
+/target
+/report
+/report-demo
+/report-h
+
+# Personal / local editor + agent settings
+.claude/
+
+# Local run scripts (personal tunnel / RPC settings)
+crawl.bat
+serve.bat
+
+# Runtime data (keep assets/world.min.json, which is committed)
+geo-cache.json
+history.json
+crawl-state.json
+*-state.json
+*.json.tmp
+*.db
+*.db-wal
+*.db-shm
+ne_110m_admin_0_countries.geo.json
+bip110-rules.example.json

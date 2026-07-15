@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Why support BIP-110?</title>
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Why support BIP-110?">
+  <meta name="twitter:description" content="The case for the Reduced Data Temporary Softfork — keep Bitcoin lean, decentralised, and focused on money.">
+  <meta name="twitter:image" content="https://bip110.xyz/summary_large_image.png">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="Why support BIP-110?">
+  <meta property="og:description" content="The case for the Reduced Data Temporary Softfork — keep Bitcoin lean, decentralised, and focused on money.">
+  <meta property="og:image" content="https://bip110.xyz/summary_large_image.png">
+  <meta property="og:url" content="https://bip110.xyz/why">
+
+<style>
+/*__THEME__*/
+/*__CSS__*/
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <span class="brand">▚ BIP-110</span>
+    <span style="display:flex; gap:10px; flex-wrap:wrap;">
+      <a href="/">◂ Live network crawler</a>
+      <a href="/code">⟨/⟩ Code walkthrough</a>
+      <a href="/support">⚡ Support</a>
+    </span>
+  </nav>
+
+  <div class="hero">
+    <span class="tag">Reduced Data Temporary Softfork</span>
+    <h1>Why support <span class="accent">BIP-110</span>?</h1>
+    <p class="lead">BIP-110 is a temporary, miner-activated soft fork that tightens Bitcoin's limits
+      on non-monetary data. The goal is simple: keep the blockchain lean enough that ordinary people
+      can keep running full nodes — and keep Bitcoin's scarce block space working for money.</p>
+  </div>
+
+  <section>
+    <h2>What it actually does</h2>
+    <div class="panel">
+      <p style="margin:0 0 12px; color:var(--ink-2); font-size:14.5px;">
+        Bitcoin blocks are a shared, permanent, every-node-forever resource. Over time, techniques
+        emerged to stuff arbitrary data — images, tokens, and other non-financial payloads — into that
+        space. Every byte is downloaded, validated, and stored by every full node on Earth, essentially forever.
+      </p>
+      <p style="margin:0; color:var(--ink-2); font-size:14.5px;">
+        BIP-110 restores tighter limits on that arbitrary-data usage. It activates like BIP-9:
+        miners set <b>bit 4</b> in the block version, and once <b>1109 of any 2016 blocks (55%)</b>
+        signal, the rules lock in. Because it is <b>temporary</b> and <b>soft</b>, it is low-risk and
+        does not split the network — nodes that don't upgrade still follow the chain.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>The case for support</h2>
+    <p class="hint">Six reasons node operators, miners, and businesses back BIP-110.</p>
+    <div class="grid arg-grid">
+      <div class="arg"><span class="ico">🌐</span><h3>Protect decentralisation</h3>
+        <p>A leaner chain means cheaper disk, bandwidth, and sync time. The lower the cost of running a
+          full node, the more people can — and node count is the backbone of Bitcoin's censorship resistance.</p></div>
+      <div class="arg"><span class="ico">💸</span><h3>Bitcoin is money first</h3>
+        <p>Block space is scarce and paid for by everyone. Reserving it for monetary transactions keeps
+          fees predictable for real payments instead of bidding wars over arbitrary data storage.</p></div>
+      <div class="arg"><span class="ico">🧹</span><h3>Curb spam &amp; bloat</h3>
+        <p>Non-financial payloads inflate block and chain size without adding monetary utility. Tighter
+          data limits slow that growth and keep the UTXO set and archive healthier.</p></div>
+      <div class="arg"><span class="ico">↩️</span><h3>Low-risk &amp; temporary</h3>
+        <p>It's a <em>soft</em> fork (backwards-compatible) and explicitly <em>temporary</em>. It can lapse
+          or be revisited — no contentious hard fork, no forced chain split, no permanent commitment.</p></div>
+      <div class="arg"><span class="ico">📊</span><h3>Activated by the market</h3>
+        <p>Nothing is imposed. Activation requires 55% of a difficulty period's 2016 blocks to signal —
+          a genuine, measurable supermajority of hash power choosing the rule, not a top-down decree.</p></div>
+      <div class="arg"><span class="ico">🗳️</span><h3>You decide</h3>
+        <p>Support is opt-in: run software that enforces the limits and, if you mine, signal for it.
+          This crawler exists so anyone can watch that choice play out across the network in real time.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Where the network stands right now</h2>
+    <p class="hint">Live figures from the crawler — real handshakes with reachable peers, updated continuously.
+      <span id="live-note" class="muted"></span></p>
+    <div id="live-charts" class="grid charts">
+      <div class="panel">
+        <h3>Miner signalling</h3>
+        <p class="sub">Block-version bit 4 in the current difficulty period (2016 blocks) — the authoritative activation signal.</p>
+        <div class="big" id="sig-pct">—</div>
+        <div class="gauge-track"><div class="gauge-fill" id="sig-fill" style="width:0%"></div>
+          <div class="gauge-threshold" id="sig-thr" style="left:55%"></div></div>
+        <p class="sub" id="sig-note" style="margin-top:26px;"></p>
+      </div>
+      <div class="panel">
+        <h3>Node readiness</h3>
+        <p class="sub">Reachable nodes running BIP-110-ready software (detected from the user agent).</p>
+        <div class="big" id="ready-pct">—</div>
+        <div class="bars" id="chart-ready" style="margin-top:16px;"></div>
+      </div>
+      <div class="panel">
+        <h3>Client software</h3>
+        <p class="sub">Implementation mix across the reachable network.</p>
+        <div class="bars" id="chart-impl"></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>How activation works</h2>
+    <p class="hint">BIP-110 uses the same battle-tested miner-signalling mechanism as past soft forks.</p>
+    <div class="flow">
+      <div class="step"><div class="n">STEP 1</div><div class="t">Software ships</div><div class="d">Nodes run a build that enforces the reduced-data rules.</div></div>
+      <div class="arrow">→</div>
+      <div class="step"><div class="n">STEP 2</div><div class="t">Miners signal</div><div class="d">Blocks set version bit 4 to show readiness.</div></div>
+      <div class="arrow">→</div>
+      <div class="step"><div class="n">STEP 3</div><div class="t">55% threshold</div><div class="d">1109 of any 2016 blocks signal → the rule locks in.</div></div>
+      <div class="arrow">→</div>
+      <div class="step"><div class="n">STEP 4</div><div class="t">Enforced</div><div class="d">The tighter data limits become consensus for signalling nodes.</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>How to support it</h2>
+    <div class="panel">
+      <ol class="steps">
+        <li><b>Run a BIP-110-ready node.</b> Use a Bitcoin Knots build that ships BIP-110 — a mainline build
+          dated <code class="inline">Knots:20260508</code> or later, or any build tagged
+          <code class="inline">+bip110</code> / <code class="inline">UASF-BIP110</code>.</li>
+        <li><b>Tighten your data policy.</b> Add these to <code class="inline">bitcoin.conf</code> and restart:
+          <pre>datacarrier=0
+permitbaremultisig=0
+rejectparasites=1
+rejecttokens=1</pre></li>
+        <li><b>Signal, if you mine.</b> Configure your template so blocks set version bit 4. Every signalling
+          block moves the network toward the 55% threshold.</li>
+        <li><b>Check yourself on the map.</b> Open the <a href="/">live crawler</a> — reachable nodes running a
+          ready build show as <span style="color:var(--good)">BIP-110 ready</span>.</li>
+      </ol>
+    </div>
+  </section>
+
+  <section>
+    <h2>An honest note</h2>
+    <div class="callout">
+      <b>This is a contested topic.</b> Reasonable people disagree about on-chain data limits — some argue
+      fees alone should ration block space, or that filters are easy to bypass. BIP-110's temporary,
+      opt-in, miner-signalled design is a deliberate response: it lets the market decide with minimal risk.
+      Read the specification and judge for yourself before you signal.
+    </div>
+  </section>
+
+  <div class="cta">
+    <a class="btn" href="/">▚ Watch the live network →</a>
+  </div>
+
+  <footer>bip110.xyz · a live BIP-110 node crawler · figures on this page are measured from the crawl, diagrams are illustrative</footer>
+</div>
+
+<script>
+/*__JS__*/
+</script>
+</body>
+</html>

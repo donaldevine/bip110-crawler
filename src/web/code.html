@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BIP-110 Code Walkthrough</title>
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="BIP-110 Code Walkthrough">
+<meta name="twitter:description" content="The seven consensus rules of BIP-110 and how they're implemented — small enough to review by hand.">
+<meta name="twitter:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:type" content="article">
+<meta property="og:title" content="BIP-110 Code Walkthrough">
+<meta property="og:description" content="The seven consensus rules of BIP-110 and how they're implemented — small enough to review by hand.">
+<meta property="og:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:url" content="https://bip110.xyz/code">
+<style>
+/*__THEME__*/
+/*__CSS__*/
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <span class="brand">▚ BIP-110</span>
+    <span style="display:flex; gap:10px; flex-wrap:wrap;">
+      <a href="/">◂ Live crawler</a>
+      <a href="/why">Why BIP-110?</a>
+      <a href="/support">⚡ Support</a>
+    </span>
+  </nav>
+
+  <div class="hero">
+    <span class="tag">Code walkthrough</span>
+    <h1>What <span class="accent">BIP-110</span> actually changes</h1>
+    <p class="lead">BIP-110 is deliberately tiny — in Bitcoin Knots it is <b>5 modified and 72 added
+      lines across 5 source files</b>, small enough to read end to end. It promotes a set of existing
+      standardness filters into consensus rules that reduce how much arbitrary data a transaction can
+      commit on-chain. Here are the seven rules and how each is enforced.</p>
+  </div>
+
+  <section>
+    <h2>The seven rules</h2>
+    <p class="hint">While BIP-110 is active, script validation runs with one new flag,
+      <code class="inline">SCRIPT_VERIFY_REDUCED_DATA</code>, which swaps in tighter limits. Each rule is a
+      consensus check that rejects a specific kind of oversized or arbitrary data.</p>
+    <div class="rules">
+      <div class="rule"><span class="rn">1</span><div><h3>Output size limit</h3>
+        <p>A new output's script may not exceed <b>34 bytes</b> — enough for standard payment outputs.
+          The one exception is a data output (<code class="inline">OP_RETURN</code>), allowed up to
+          <b>83 bytes</b>. Enforced by a new <code class="inline">CheckOutputSizes</code> function.</p></div></div>
+      <div class="rule"><span class="rn">2</span><div><h3>Data-push limit</h3>
+        <p>Individual data pushes and witness stack items may not exceed <b>256 bytes</b> (down from the
+          usual 520), via <code class="inline">MAX_SCRIPT_ELEMENT_SIZE_REDUCED</code>. A BIP16 P2SH
+          <code class="inline">redeemScript</code> push is exempted so existing P2SH keeps working.</p></div></div>
+      <div class="rule"><span class="rn">3</span><div><h3>Undefined witness versions</h3>
+        <p>Spending an output with an <b>undefined witness version</b> becomes invalid (creating one stays
+          valid). This also closes a Bitcoin Core edge case around anchor outputs.</p></div></div>
+      <div class="rule"><span class="rn">4</span><div><h3>Taproot annex rejected</h3>
+        <p>A witness stack that carries a Taproot <b>annex</b> is invalid. Previously the annex was merely
+          non-standard policy; BIP-110 makes rejecting it a consensus rule.</p></div></div>
+      <div class="rule"><span class="rn">5</span><div><h3>Control-block size limit</h3>
+        <p>A Taproot <b>control block</b> larger than <b>257 bytes</b> is invalid
+          (<code class="inline">TAPROOT_CONTROL_MAX_SIZE_REDUCED</code>) — still enough for a merkle tree of
+          128 script leaves.</p></div></div>
+      <div class="rule"><span class="rn">6</span><div><h3>No OP_SUCCESS</h3>
+        <p>A tapscript that contains an <code class="inline">OP_SUCCESS</code> opcode <b>anywhere</b> is
+          invalid, closing off a large class of otherwise-unconstrained script data.</p></div></div>
+      <div class="rule"><span class="rn">7</span><div><h3>No OP_IF / OP_NOTIF</h3>
+        <p>A tapscript that <b>executes</b> <code class="inline">OP_IF</code> or
+          <code class="inline">OP_NOTIF</code> is invalid, reusing the existing minimal-IF error as a
+          stricter form of the same restriction.</p></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>How it stays backwards-compatible</h2>
+    <div class="grid two">
+      <div class="panel"><h3>Grandfathering, per input</h3>
+        <p>Nothing already on the chain is retroactively invalidated. Rules apply <b>per input</b>: each
+          input is judged against the block height of the output it spends. Inputs spending outputs created
+          <em>before</em> activation have the reduced-data flags cleared individually
+          (<code class="inline">flags_per_input</code> in <code class="inline">CheckInputScripts</code>,
+          gated on <code class="inline">reduced_data_start_height</code>). Because flags now vary per input,
+          the script-verification cache is bypassed when that happens.</p></div>
+      <div class="panel"><h3>Where it's enforced</h3>
+        <p>Most checks live in the interpreter behind
+          <code class="inline">SCRIPT_VERIFY_REDUCED_DATA</code>. The output-size rule runs in
+          <code class="inline">CheckTxInputs</code> (not <code class="inline">CheckTransaction</code>, which
+          can't see deployment status), and the coinbase/generation transaction — which has no inputs —
+          gets an explicit <code class="inline">CheckOutputSizes</code> call so Rule 1 applies chain-wide.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Activation &amp; expiry — a temporary soft fork</h2>
+    <p class="hint">BIP-110 extends the BIP9 version-bits state machine with BIP8-style mandatory
+      signalling and a new terminal state, so the fork is guaranteed to activate and then automatically
+      lapses.</p>
+    <div class="grid two">
+      <div class="panel"><h3>Mandatory signalling</h3>
+        <p>In the retarget period(s) just before the deadline
+          (<code class="inline">max_activation_height</code>), blocks that do <b>not</b> set version bit 4
+          are rejected as invalid (<code class="inline">DeploymentMustSignalAfter</code>, checked by a new
+          <code class="inline">ContextualCheckBlockHeaderVolatile</code>). One period before the deadline,
+          the state is <b>forced to LOCKED_IN</b> regardless of the signalling percentage — so lock-in is
+          guaranteed no later than the deadline.</p></div>
+      <div class="panel"><h3>Automatic expiry</h3>
+        <p>A new <code class="inline">active_duration</code> (52,416 blocks, ~1 year) makes the deployment
+          <b>temporary</b>. Once <code class="inline">activation_height + active_duration</code> is reached,
+          the state machine moves from <b>ACTIVE</b> to a new terminal <b>EXPIRED</b> state
+          (<code class="inline">DeploymentActiveAfter</code>): the reduced-data rules stop being enforced and
+          outputs are unrestricted again.</p></div>
+    </div>
+    <div class="callout" style="margin-top:16px;">The activation threshold is a per-deployment <b>55%</b>
+      of a 2016-block difficulty period (1109 blocks), overriding the usual 95% — a small change to the
+      <code class="inline">Threshold</code> logic in <code class="inline">versionbits.cpp</code>.</div>
+  </section>
+
+  <section>
+    <h2>The five files</h2>
+    <div class="files">
+      <div class="file"><code>src/consensus/tx_verify.cpp</code><span>New <code>CheckOutputSizes</code> — Rule 1 (output and data-carrier size limits).</span></div>
+      <div class="file"><code>src/script/interpreter.cpp</code><span>Reduced element &amp; control-block sizes, annex rejection, OP_IF/OP_NOTIF, the P2SH <code>redeemScript</code> exemption, and the anchor-output fix — Rules 2, 4, 5, 7 (and 3).</span></div>
+      <div class="file"><code>src/validation.cpp</code><span>Per-input grandfathering (<code>flags_per_input</code>), the coinbase output check, and block-header mandatory-signalling checks.</span></div>
+      <div class="file"><code>src/deploymentstatus.h</code><span><code>DeploymentActiveAfter</code> (temporary-fork expiry) and <code>DeploymentMustSignalAfter</code> (mandatory-signalling window).</span></div>
+      <div class="file"><code>src/versionbits.cpp</code><span>Forced LOCKED_IN before the deadline, the ACTIVE → EXPIRED transition, and the per-deployment 55% threshold.</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Why it's reviewable</h2>
+    <div class="callout">The point of keeping BIP-110 to a few dozen lines is that <b>you don't have to be a
+      C++ developer to audit it</b>. Most rules simply promote limits nodes already apply as policy into
+      consensus, guarded by a single flag. The per-input grandfathering and the temporary-expiry state are
+      the only genuinely new machinery.</div>
+  </section>
+
+  <p class="src">Summarised from the
+    <a href="https://bitcoinknots.org/learn/bip110-code-walkthrough.html" target="_blank" rel="noopener">Bitcoin Knots BIP-110 code walkthrough</a>
+    · full specification:
+    <a href="https://github.com/bitcoin/bips/blob/master/bip-0110.mediawiki" target="_blank" rel="noopener">BIP-110</a>.
+    Descriptions are paraphrased — see the sources for the exact code.</p>
+
+  <div class="cta"><a class="btn" href="/">▚ Back to the live network →</a></div>
+  <footer>bip110.xyz · a live BIP-110 node crawler</footer>
+</div>
+</body>
+</html>

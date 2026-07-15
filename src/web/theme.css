@@ -1,0 +1,39 @@
+/* Shared cyberpunk theme foundation: design tokens, base reset, page backdrop, and
+   link styling. report.rs injects this into every page's <style> block so the palette
+   and background live in exactly one place. */
+:root {
+  --page:#06060f; --surface:#0c0e1e; --surface-2:#12152c;
+  --ink:#eaf2ff; --ink-2:#98a2ce; --muted:#5c6591;
+  --grid:#1a2044; --border:rgba(0,229,255,0.22);
+  --good:#00ff9c; --warn:#ffcb2b; --neutral:#5c6591;
+  --neon:#00e5ff; --neon2:#ff2d95; --glow:rgba(0,229,255,0.55);
+  /* categorical slots (distinct + legible on the dark surface) */
+  --c1:#3aa0ff; --c2:#1fe0a4; --c3:#ffcf3f; --c4:#37e06a;
+  --c5:#9d7bff; --c6:#ff5d73; --c7:#ff77c8; --c8:#ff8a3d; --c9:#6b7398;
+  --radius:12px;
+  --mono:ui-monospace,"Cascadia Code","JetBrains Mono","Segoe UI Mono",Consolas,monospace;
+}
+/* Always dark (cyberpunk). No light theme. */
+* { box-sizing: border-box; }
+body {
+  margin:0; background:var(--page); color:var(--ink);
+  font-family: system-ui,-apple-system,"Segoe UI",sans-serif;
+  line-height:1.6; position:relative; min-height:100vh;
+}
+/* neon grid + vignette backdrop */
+body::before {
+  content:""; position:fixed; inset:0; z-index:-2; pointer-events:none;
+  background:
+    linear-gradient(var(--grid) 1px, transparent 1px) 0 0/44px 44px,
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0/44px 44px;
+  opacity:.5;
+  -webkit-mask-image: radial-gradient(ellipse at 50% 0%, #000 30%, transparent 85%);
+          mask-image: radial-gradient(ellipse at 50% 0%, #000 30%, transparent 85%);
+}
+body::after {
+  content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+  background: radial-gradient(1100px 620px at 50% -8%, var(--glow), transparent 70%);
+  opacity:.28;
+}
+a { color:var(--neon); text-decoration:none; }
+a:hover { text-shadow:0 0 8px var(--glow); }

@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Bitcoin BIP-110 Node Crawler</title>
+
+    <!-- X (Twitter) Card Meta Tags -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Live Bitcoin BIP-110 Node Crawler">
+    <meta name="twitter:description" content="Live view of Bitcoin BIP-110 nodes.">
+    <meta name="twitter:image" content="https://bip110.xyz/summary_large_image.png">
+
+    <!-- Open Graph Tags (Fallback used by Facebook, LinkedIn, and often X) -->
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Live Bitcoin BIP-110 Node Crawler">
+    <meta property="og:description" content="Live view of Bitcoin BIP-110 nodes.">
+    <meta property="og:image" content="https://bip110.xyz/summary_large_image.png">
+    <meta property="og:url" content="https://bip110.xyz/">
+
+<style>
+/*__THEME__*/
+/*__CSS__*/
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>BIP-110 Bitcoin Node Crawl</h1>
+      <div class="sub" id="subtitle"></div>
+    </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      <a class="theme-toggle" href="/why">★ Why support BIP-110?</a>
+      <a class="theme-toggle" href="/code">⟨/⟩ Code walkthrough</a>
+      <a class="theme-toggle" href="/support">⚡ Support</a>
+    </div>
+  </header>
+
+  <div class="grid cards" id="cards"></div>
+
+  <section>
+    <h2>Miner signalling for BIP-110 (block version bit 4)</h2>
+    <p class="hint">This is the authoritative figure. BIP-110 activates when 55% (1109) of
+      the 2016 blocks in a <b>difficulty adjustment period</b> set bit 4 in their version
+      field — the tally is counted per retarget period, not over a rolling window. Measured
+      by scanning the current period's block headers from your own node — not from peer gossip.</p>
+    <div class="panel" id="signal-panel"></div>
+  </section>
+
+  <section id="timeline-section">
+    <h2>Road to mandatory lock-in</h2>
+    <p class="hint">BIP-110 uses BIP8-style <b>mandatory signalling</b> in the retarget period
+      before a guaranteed lock-in — during that window, blocks that don't signal bit 4 are
+      rejected as invalid. Being a <b>temporary</b> soft fork, it then expires ~1 year
+      (52,416 blocks) after activation, and the data limits are lifted. The countdown is
+      estimated from the current chain tip at ~10 min/block.</p>
+    <div class="panel" id="timeline-panel"></div>
+  </section>
+
+  <section>
+    <h2>Network map</h2>
+    <p class="hint">A 3D force-directed map. Each node is a peer we handshook with (or
+      heard about); a connector means the source node gossiped the target's address via
+      <code>getaddr</code> — reachability, not a confirmed live link. <b>Drag to rotate</b>,
+      <b>scroll to zoom</b>, hover a node for details. Colour = implementation.</p>
+    <div class="graph-wrap panel">
+      <canvas id="graph"></canvas>
+      <div class="tooltip" id="gtip"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </section>
+
+  <section id="geo-section" style="display:none;">
+    <h2>Geographic map</h2>
+    <p class="hint">Nodes placed by IP geolocation (via ip-api.com). Colour = implementation;
+      each dot is a node's approximate location. <b>Drag to pan, scroll to zoom</b>, hover for
+      city and client details. Tor/onion nodes are anonymous (no IP) and can't be mapped —
+      they appear on the network map above but not here.</p>
+    <div class="graph-wrap panel">
+      <canvas id="geomap"></canvas>
+      <div class="tooltip" id="mtip"></div>
+      <div class="legend" id="geolegend"></div>
+    </div>
+  </section>
+
+  <section class="grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));">
+    <div class="panel">
+      <h2>Implementations</h2>
+      <p class="hint">Client software across all reachable nodes.</p>
+      <div class="bars" id="chart-impl"></div>
+    </div>
+    <div class="panel">
+      <h2>BIP-110 readiness</h2>
+      <p class="hint">Detected from each node's user agent: builds that advertise BIP-110
+        (e.g. <code>+bip110-v0.4.1</code> / <code>UASF-BIP110</code>) are marked ready. This is
+        node-software readiness — separate from the miner block-version signalling above.</p>
+      <div class="bars" id="chart-bip"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Version distribution</h2>
+    <p class="hint">Top client versions on the network.</p>
+    <div class="bars" id="chart-ver"></div>
+  </section>
+
+  <section>
+    <h2>All nodes</h2>
+    <div class="controls">
+      <input id="search" type="search" placeholder="Filter by location, client, version…">
+      <select id="filter-impl"><option value="">All implementations</option></select>
+      <select id="filter-bip">
+        <option value="">Any BIP-110 status</option>
+        <option value="enforcing">BIP-110 ready</option>
+        <option value="not_enforcing">Not ready</option>
+        <option value="unknown">Unknown</option>
+      </select>
+    </div>
+    <div class="panel" style="overflow-x:auto;">
+      <table id="nodes-table">
+        <thead><tr>
+          <th data-k="location">Location</th>
+          <th data-k="implementation">Implementation</th>
+          <th data-k="version">Version</th>
+          <th data-k="protocol_version">Protocol</th>
+          <th data-k="depth">Depth</th>
+          <th data-k="bip110">BIP-110</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="disclaimer" id="disclaimer"></p>
+  <footer>Generated by bip110-crawler · <span id="gen-time"></span></footer>
+</div>
+
+<script>
+/*__JS__*/
+</script>
+</body>
+</html>

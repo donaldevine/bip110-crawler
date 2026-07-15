@@ -12,18 +12,58 @@ use crate::{db, report};
 /// Social-preview image, embedded so it's served with no external file dependency.
 const OG_IMAGE: &[u8] = include_bytes!("../assets/summary_large_image.png");
 
+/// Donation details for the `/support` page. Loaded at startup from gitignored files
+/// (`assets/support.json` + the QR PNGs) so they are served live but never committed.
+/// The page HTML is prerendered once; missing files yield a "not configured" page.
+struct Support {
+    html: String,
+    btc_qr: Option<Vec<u8>>,
+    ln_qr: Option<Vec<u8>>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SupportConfig {
+    #[serde(default)]
+    bitcoin_address: String,
+    #[serde(default)]
+    lightning_address: String,
+}
+
+fn load_support() -> Support {
+    let cfg: SupportConfig = std::fs::read_to_string("assets/support.json")
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let btc_qr = std::fs::read("assets/bitcoin.png").ok();
+    let ln_qr = std::fs::read("assets/lightning.png").ok();
+    let html = report::render_support_html(
+        &cfg.bitcoin_address,
+        &cfg.lightning_address,
+        btc_qr.is_some(),
+        ln_qr.is_some(),
+    );
+    Support { html, btc_qr, ln_qr }
+}
+
 pub fn serve(db_path: &Path, port: u16) -> Result<()> {
     let server = tiny_http::Server::http(("127.0.0.1", port))
         .map_err(|e| anyhow!("binding 127.0.0.1:{port}: {e}"))?;
     let server = Arc::new(server);
     let page = Arc::new(report::render_api_html());
+    let support = Arc::new(load_support());
     eprintln!("[serve] http://127.0.0.1:{port}  (db: {})", db_path.display());
+    eprintln!(
+        "[serve] /support: bitcoin={} lightning={}",
+        if support.html.contains("bitcoin:") { "yes" } else { "no" },
+        if support.html.contains("lightning:") { "yes" } else { "no" },
+    );
     eprintln!("[serve] point your Cloudflare tunnel at this port.");
 
     let mut handles = Vec::new();
     for _ in 0..4 {
         let server = Arc::clone(&server);
         let page = Arc::clone(&page);
+        let support = Arc::clone(&support);
         let db_path = db_path.to_path_buf();
         handles.push(std::thread::spawn(move || {
             // Each worker gets its own connection (rusqlite Connection isn't Sync).
@@ -36,7 +76,7 @@ pub fn serve(db_path: &Path, port: u16) -> Result<()> {
             };
             loop {
                 match server.recv() {
-                    Ok(req) => handle(&conn, &page, req),
+                    Ok(req) => handle(&conn, &page, &support, req),
                     Err(_) => break,
                 }
             }
@@ -55,7 +95,7 @@ fn html_header() -> tiny_http::Header {
     tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap()
 }
 
-fn handle(conn: &rusqlite::Connection, page: &str, req: tiny_http::Request) {
+fn handle(conn: &rusqlite::Connection, page: &str, support: &Support, req: tiny_http::Request) {
     let url = req.url().to_string();
     let (path, query) = match url.split_once('?') {
         Some((p, q)) => (p, parse_query(q)),
@@ -74,6 +114,37 @@ fn handle(conn: &rusqlite::Connection, page: &str, req: tiny_http::Request) {
         let _ = req.respond(
             tiny_http::Response::from_string(report::render_why_html()).with_header(html_header()),
         );
+        return;
+    }
+
+    // "BIP-110 code walkthrough" — the seven consensus rules and how they're implemented.
+    if path == "/code" || path == "/code.html" {
+        let _ = req.respond(
+            tiny_http::Response::from_string(report::render_code_html()).with_header(html_header()),
+        );
+        return;
+    }
+
+    // "Support" page + its QR images (donation details loaded from gitignored files).
+    if path == "/support" || path == "/support.html" {
+        let _ = req.respond(
+            tiny_http::Response::from_string(support.html.clone()).with_header(html_header()),
+        );
+        return;
+    }
+    if path == "/support/bitcoin.png" || path == "/support/lightning.png" {
+        let bytes = if path.ends_with("bitcoin.png") { &support.btc_qr } else { &support.ln_qr };
+        match bytes {
+            Some(b) => {
+                let hdr =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_data(b.clone()).with_header(hdr));
+            }
+            None => {
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
+            }
+        }
         return;
     }
 

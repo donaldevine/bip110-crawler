@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bip110_crawler::{crawler, db, geo, history, node, p2p, report, rpc, serve, state};
@@ -355,6 +355,11 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
     let live = args.watch || args.snapshot_interval > 0;
     let refresh = if args.page_refresh > 0 { args.page_refresh } else { 15 };
 
+    // Shared, refreshable signalling (incl. chain tip). Seeded with the startup scan and
+    // re-measured from the node during the crawl (see the snapshot callback) so the
+    // report's tip height + lock-in countdown track the chain instead of freezing.
+    let signal_cache: Arc<Mutex<Option<node::SignalStats>>> = Arc::new(Mutex::new(signalling.clone()));
+
     // Live snapshots: rewrite the report every N seconds *during* the crawl, so a long
     // run can be watched as the DFS expands.
     let snapshot: Option<(Duration, crawler::SnapshotFn)> = if args.snapshot_interval > 0 {
@@ -362,7 +367,6 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
         let own_info = own_node_info.clone();
         let own_edges = own_edges.clone();
         let report_own = report_own.clone();
-        let signalling = signalling.clone();
         let network = net.name.to_string();
         let geolocate = args.geolocate;
         let geo_cache = args.geo_cache.clone();
@@ -371,8 +375,27 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
         let report_max = args.report_max_nodes;
         let db_path = args.db.clone();
         let network2 = net.name.to_string();
+        // A dedicated RPC client + the shared cache, so snapshots can re-scan signalling.
+        let rpc = build_rpc(args)?;
+        let signal_window = args.signal_window;
+        let signal_bit = args.signal_bit;
+        let signal_cache_cb = Arc::clone(&signal_cache);
         let cb: crawler::SnapshotFn = Arc::new(move |mut nodes: Vec<NodeInfo>, mut edges: Vec<Edge>| {
             let discovered_total = nodes.len();
+            // Re-measure signalling when the node has a NEW block, so the tip height and
+            // countdown stay live. A cheap getblockcount gates the expensive window scan.
+            if let (Some(client), true) = (&rpc, signal_window > 0) {
+                if let Ok(tip) = client.block_count() {
+                    let cached_tip = signal_cache_cb.lock().unwrap().as_ref().map(|s| s.tip_height);
+                    if cached_tip != Some(tip) {
+                        match client.signalling(signal_window, signal_bit) {
+                            Ok(s) => *signal_cache_cb.lock().unwrap() = Some(s),
+                            Err(e) => eprintln!("[snapshot] signalling refresh failed: {e:#}"),
+                        }
+                    }
+                }
+            }
+            let signalling = signal_cache_cb.lock().unwrap().clone();
             // Geolocate reachable nodes only (for map + DB).
             let geo = if geolocate {
                 let reachable: Vec<NodeInfo> = nodes.iter().filter(|n| n.online).cloned().collect();
@@ -471,6 +494,10 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
     } else {
         None
     };
+
+    // Use the freshest signalling the snapshots re-measured (falls back to the startup
+    // scan when snapshots are off).
+    let signalling = signal_cache.lock().unwrap().clone();
 
     // ---- Write the FULL dataset to SQLite (the store keeps everything) ----
     if let Some(dbpath) = &args.db {

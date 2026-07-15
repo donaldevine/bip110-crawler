@@ -94,6 +94,77 @@ pub fn render_why_html() -> String {
     WHY_TEMPLATE.to_string()
 }
 
+/// The "BIP-110 code walkthrough" page (served at `/code`): the seven consensus rules
+/// and how they're implemented. Static content, adapted from the Bitcoin Knots
+/// walkthrough (attributed on the page).
+pub fn render_code_html() -> String {
+    CODE_TEMPLATE.to_string()
+}
+
+/// The "Support this project" page (served at `/support`). Addresses and QR image paths
+/// are supplied at render time from gitignored local files (see `serve::load_support`),
+/// so donation details never live in the committed source. Empty inputs render a
+/// "not configured" notice, keeping a fresh clone functional.
+pub fn render_support_html(
+    bitcoin_address: &str,
+    lightning_address: &str,
+    has_bitcoin_qr: bool,
+    has_lightning_qr: bool,
+) -> String {
+    let mut cards = String::new();
+    if !bitcoin_address.is_empty() {
+        cards += &support_card(
+            "Bitcoin",
+            "on-chain",
+            bitcoin_address,
+            if has_bitcoin_qr { Some("/support/bitcoin.png") } else { None },
+            "bitcoin:",
+        );
+    }
+    if !lightning_address.is_empty() {
+        cards += &support_card(
+            "Lightning",
+            "instant · low fee",
+            lightning_address,
+            if has_lightning_qr { Some("/support/lightning.png") } else { None },
+            "lightning:",
+        );
+    }
+    if cards.is_empty() {
+        cards = "<div class=\"notice\">Support isn't configured on this instance.</div>".to_string();
+    }
+    SUPPORT_TEMPLATE.replace("<!--__CARDS__-->", &cards)
+}
+
+/// One donation-method card: an optional QR, the address/invoice in a copyable box, and
+/// copy / open-in-wallet buttons.
+fn support_card(title: &str, subtitle: &str, value: &str, qr_src: Option<&str>, uri_scheme: &str) -> String {
+    let v = html_escape(value);
+    let qr = match qr_src {
+        Some(src) => format!("<img class=\"qr\" src=\"{src}\" alt=\"{title} QR code\" width=\"220\" height=\"220\">"),
+        None => String::new(),
+    };
+    format!(
+        "<div class=\"method\">\
+           <div class=\"mhead\"><h2>{title}</h2><span class=\"msub\">{subtitle}</span></div>\
+           {qr}\
+           <div class=\"addr\" title=\"{v}\">{v}</div>\
+           <div class=\"mbtns\">\
+             <button class=\"btn copy\" data-val=\"{v}\">Copy</button>\
+             <a class=\"btn open\" href=\"{uri_scheme}{v}\">Open in wallet</a>\
+           </div>\
+         </div>"
+    )
+}
+
+/// Minimal HTML escaping for donation strings injected into the support page.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 /// The report is a single self-contained page. `/*__DATA__*/null` is replaced with
 /// the serialized `ReportData` at generation time.
 const TEMPLATE: &str = r####"<!doctype html>
@@ -254,6 +325,31 @@ const TEMPLATE: &str = r####"<!doctype html>
   .disclaimer { font-size:11.5px; color:var(--muted); margin-top:12px; font-family:var(--mono); }
   footer { margin-top:40px; color:var(--muted); font-size:11.5px; font-family:var(--mono); }
   a { color:var(--neon); text-decoration:none; } a:hover { text-shadow:0 0 8px var(--glow); }
+  /* activation timeline / countdown */
+  .cd { text-align:center; padding:6px 0 22px; border-bottom:1px solid var(--grid); margin-bottom:24px; }
+  .cd-big { font-family:var(--mono); font-size:clamp(30px,6vw,46px); font-weight:800; color:var(--neon);
+    text-shadow:0 0 16px var(--glow); line-height:1.05; }
+  .cd-big small { font-size:16px; color:var(--ink-2); font-weight:500; text-shadow:none; }
+  .cd-sub { color:var(--ink); font-size:14px; margin-top:8px; }
+  .cd-sub b { color:var(--neon); }
+  .cd-note { color:var(--muted); font-size:12px; font-family:var(--mono); margin-top:4px; }
+  .timeline { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; position:relative; }
+  @media (max-width:720px){ .timeline { grid-template-columns:1fr 1fr; row-gap:26px; } }
+  .tl-node { position:relative; padding-top:28px; text-align:center; }
+  .tl-node::before { content:""; position:absolute; top:12px; left:-50%; width:100%; height:2px;
+    background:var(--grid); z-index:0; }
+  .tl-node:first-child::before { display:none; }
+  .tl-node.done::before { background:var(--good); box-shadow:0 0 6px var(--good); }
+  .tl-dot { position:absolute; top:5px; left:50%; transform:translateX(-50%); width:15px; height:15px;
+    border-radius:50%; background:var(--surface-2); border:2px solid var(--muted); z-index:1; }
+  .tl-node.done .tl-dot { background:var(--good); border-color:var(--good); box-shadow:0 0 10px var(--good); }
+  .tl-node.next .tl-dot { border-color:var(--neon); box-shadow:0 0 12px var(--glow);
+    animation:pulse 1.6s ease-in-out infinite; }
+  .tl-h { font-family:var(--mono); font-size:12px; color:var(--neon); }
+  .tl-t { font-size:13px; color:var(--ink); font-weight:600; margin-top:3px; }
+  .tl-d { font-size:11.5px; color:var(--muted); margin-top:3px; line-height:1.4; }
+  .tl-rel { display:inline-block; margin-top:8px; font-family:var(--mono); font-size:11px; color:var(--ink-2);
+    background:var(--surface-2); border:1px solid var(--border); border-radius:999px; padding:2px 9px; }
 </style>
 </head>
 <body>
@@ -263,17 +359,32 @@ const TEMPLATE: &str = r####"<!doctype html>
       <h1>BIP-110 Bitcoin Node Crawl</h1>
       <div class="sub" id="subtitle"></div>
     </div>
-    <a class="theme-toggle" href="/why">★ Why support BIP-110?</a>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      <a class="theme-toggle" href="/why">★ Why support BIP-110?</a>
+      <a class="theme-toggle" href="/code">⟨/⟩ Code walkthrough</a>
+      <a class="theme-toggle" href="/support">⚡ Support</a>
+    </div>
   </header>
 
   <div class="grid cards" id="cards"></div>
 
   <section>
     <h2>Miner signalling for BIP-110 (block version bit 4)</h2>
-    <p class="hint">This is the authoritative figure. BIP-110 activates when 55% of
-      the last 2016 blocks (1109 blocks) set bit 4 in their version field. Measured by
-      scanning recent block headers from your own node — not from peer gossip.</p>
+    <p class="hint">This is the authoritative figure. BIP-110 activates when 55% (1109) of
+      the 2016 blocks in a <b>difficulty adjustment period</b> set bit 4 in their version
+      field — the tally is counted per retarget period, not over a rolling window. Measured
+      by scanning the current period's block headers from your own node — not from peer gossip.</p>
     <div class="panel" id="signal-panel"></div>
+  </section>
+
+  <section id="timeline-section">
+    <h2>Road to mandatory lock-in</h2>
+    <p class="hint">BIP-110 uses BIP8-style <b>mandatory signalling</b> in the retarget period
+      before a guaranteed lock-in — during that window, blocks that don't signal bit 4 are
+      rejected as invalid. Being a <b>temporary</b> soft fork, it then expires ~1 year
+      (52,416 blocks) after activation, and the data limits are lifted. The countdown is
+      estimated from the current chain tip at ~10 min/block.</p>
+    <div class="panel" id="timeline-panel"></div>
   </section>
 
   <section>
@@ -413,12 +524,16 @@ function renderCards(){
     `${esc(DATA.network)} · own node ${esc(DATA.own_node.subversion || "n/a")} · `
     + `${reachable.toLocaleString()} reachable nodes${live}`;
   document.getElementById("gen-time").textContent = DATA.generated_at;
+  const ready = (a.by_bip110 && a.by_bip110["BIP-110 ready"]) || 0;
+  const readyPct = reachable ? (ready / reachable * 100) : 0;
   const cards = [
     ["Reachable nodes", reachable.toLocaleString(), "responding to the crawl"],
     ["Tor nodes", tor.toLocaleString(), "reachable over onion"],
+    ["BIP-110 ready", readyPct.toFixed(1)+"%",
+       `${ready.toLocaleString()} of ${reachable.toLocaleString()} reachable nodes`],
     ["Implementations", Object.keys(a.by_implementation).length, "distinct clients"],
     ["Miner signalling", sig ? sig.percent.toFixed(1)+"%" : "n/a",
-       sig ? `${sig.blocks_signalling}/${sig.blocks_scanned} recent blocks` : "RPC not available"],
+       sig ? `${sig.blocks_signalling}/${sig.blocks_scanned} blocks this period` : "RPC not available"],
   ];
   document.getElementById("cards").innerHTML = cards.map(([l,v,n]) =>
     `<div class="card"><div class="label">${esc(l)}</div>
@@ -435,7 +550,7 @@ function renderSignalling(){
                 : `${(sig.threshold_percent - sig.percent).toFixed(1)} points below lock-in`;
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--ink-2);margin-bottom:6px;">
-      <span><b style="color:var(--ink)">${sig.percent.toFixed(1)}%</b> of last ${sig.blocks_scanned} blocks signal (bit ${sig.bit})</span>
+      <span><b style="color:var(--ink)">${sig.percent.toFixed(1)}%</b> of ${sig.blocks_scanned} blocks so far this period signal (bit ${sig.bit})</span>
       <span>${esc(status)}</span>
     </div>
     <div class="gauge-track">
@@ -443,7 +558,62 @@ function renderSignalling(){
       <div class="gauge-threshold" style="left:${sig.threshold_percent}%"></div>
     </div>
     <div class="note" style="margin-top:14px;">Chain tip height ${sig.tip_height.toLocaleString()}.
-      ${sig.blocks_signalling} of ${sig.blocks_scanned} scanned blocks set version bit ${sig.bit}.</div>`;
+      ${sig.blocks_signalling} of ${sig.blocks_scanned} blocks so far in the current difficulty
+      period (2016 blocks) set version bit ${sig.bit}.</div>`;
+}
+
+// BIP-110 activation schedule (block heights, BIP8/BIP9 semantics from the spec):
+//  - mandatory signalling spans one retarget period (961632–963647)
+//  - lock-in is guaranteed no later than 963648
+//  - ACTIVE follows one retarget later (965664); the fork EXPIRES active_duration
+//    (52416 blocks, ~1 year) after that, lifting the data limits.
+function renderTimeline(){
+  const el = document.getElementById("timeline-panel");
+  if (!el) return;
+  const MANDATORY_START = 961632, LOCKIN = 963648, RETARGET = 2016, ACTIVE_DURATION = 52416;
+  const ACTIVE = LOCKIN + RETARGET, EXPIRED = ACTIVE + ACTIVE_DURATION;
+  const sig = DATA.signalling;
+  const tip = (sig && typeof sig.tip_height === "number") ? sig.tip_height : null;
+  const fmt = n => n.toLocaleString();
+  const human = blocks => {
+    const days = blocks * 10 / 1440;
+    if (days >= 60) return `~${(days/30.44).toFixed(1)} months`;
+    if (days >= 1.5) return `~${Math.round(days)} days`;
+    return `~${Math.max(1, Math.round(days*24))} hours`;
+  };
+  const etaDate = blocks => new Date(Date.now() + blocks*10*60*1000).toISOString().slice(0,10);
+
+  const milestones = [
+    { h: MANDATORY_START, t:"Mandatory signalling begins", d:"Blocks not signalling bit 4 are rejected as invalid" },
+    { h: LOCKIN,          t:"Mandatory lock-in",           d:"Lock-in guaranteed no later than this block" },
+    { h: ACTIVE,          t:"Active — limits enforced",     d:"Reduced-data rules become consensus" },
+    { h: EXPIRED,         t:"Expires (temporary)",          d:`~1 year (${fmt(ACTIVE_DURATION)} blocks) after activation → limits lifted` },
+  ];
+
+  let headline;
+  if (tip == null){
+    headline = `<div class="cd"><div class="cd-sub">Connect the crawler to your node (RPC) to show a live block-countdown from the chain tip.</div></div>`;
+  } else {
+    const next = milestones.find(m => m.h > tip);
+    headline = next
+      ? `<div class="cd"><div class="cd-big">${fmt(next.h - tip)}<small> blocks</small></div>`
+        + `<div class="cd-sub">to <b>${esc(next.t)}</b> · ${human(next.h - tip)} · est. ${etaDate(next.h - tip)}</div>`
+        + `<div class="cd-note">chain tip ${fmt(tip)}</div></div>`
+      : `<div class="cd"><div class="cd-big">Expired</div><div class="cd-sub">the temporary soft fork has ended — data limits lifted</div>`
+        + `<div class="cd-note">chain tip ${fmt(tip)}</div></div>`;
+  }
+
+  const nextH = tip == null ? null : (milestones.find(m => m.h > tip) || {}).h;
+  const nodes = milestones.map(m => {
+    const state = tip == null ? "" : (tip >= m.h ? "done" : (m.h === nextH ? "next" : "future"));
+    const rel = (tip != null && tip < m.h)
+      ? `<span class="tl-rel">in ${fmt(m.h - tip)} · ${human(m.h - tip)}</span>` : "";
+    return `<div class="tl-node ${state}"><div class="tl-dot"></div>`
+      + `<div class="tl-h">block ${fmt(m.h)}</div><div class="tl-t">${esc(m.t)}</div>`
+      + `<div class="tl-d">${esc(m.d)}</div>${rel}</div>`;
+  }).join("");
+
+  el.innerHTML = headline + `<div class="timeline">${nodes}</div>`;
 }
 
 function barChart(elId, entries, colorFn){
@@ -922,6 +1092,7 @@ document.getElementById("disclaimer").textContent =
 function renderAll(){
   renderCards();
   renderSignalling();
+  renderTimeline();
   renderCharts();
   graph.update(DATA);
   geoMap.update(DATA);
@@ -1078,7 +1249,11 @@ const WHY_TEMPLATE: &str = r####"<!doctype html>
 <div class="wrap">
   <nav>
     <span class="brand">▚ BIP-110</span>
-    <a href="/">◂ Live network crawler</a>
+    <span style="display:flex; gap:10px; flex-wrap:wrap;">
+      <a href="/">◂ Live network crawler</a>
+      <a href="/code">⟨/⟩ Code walkthrough</a>
+      <a href="/support">⚡ Support</a>
+    </span>
   </nav>
 
   <div class="hero">
@@ -1123,8 +1298,8 @@ const WHY_TEMPLATE: &str = r####"<!doctype html>
         <p>It's a <em>soft</em> fork (backwards-compatible) and explicitly <em>temporary</em>. It can lapse
           or be revisited — no contentious hard fork, no forced chain split, no permanent commitment.</p></div>
       <div class="arg"><span class="ico">📊</span><h3>Activated by the market</h3>
-        <p>Nothing is imposed. Activation requires 55% of recent blocks to signal — a genuine, measurable
-          supermajority of hash power choosing the rule, not a top-down decree.</p></div>
+        <p>Nothing is imposed. Activation requires 55% of a difficulty period's 2016 blocks to signal —
+          a genuine, measurable supermajority of hash power choosing the rule, not a top-down decree.</p></div>
       <div class="arg"><span class="ico">🗳️</span><h3>You decide</h3>
         <p>Support is opt-in: run software that enforces the limits and, if you mine, signal for it.
           This crawler exists so anyone can watch that choice play out across the network in real time.</p></div>
@@ -1138,7 +1313,7 @@ const WHY_TEMPLATE: &str = r####"<!doctype html>
     <div id="live-charts" class="grid charts">
       <div class="panel">
         <h3>Miner signalling</h3>
-        <p class="sub">Block-version bit 4 over the last 2016 blocks — the authoritative activation signal.</p>
+        <p class="sub">Block-version bit 4 in the current difficulty period (2016 blocks) — the authoritative activation signal.</p>
         <div class="big" id="sig-pct">—</div>
         <div class="gauge-track"><div class="gauge-fill" id="sig-fill" style="width:0%"></div>
           <div class="gauge-threshold" id="sig-thr" style="left:55%"></div></div>
@@ -1147,7 +1322,8 @@ const WHY_TEMPLATE: &str = r####"<!doctype html>
       <div class="panel">
         <h3>Node readiness</h3>
         <p class="sub">Reachable nodes running BIP-110-ready software (detected from the user agent).</p>
-        <div class="bars" id="chart-ready"></div>
+        <div class="big" id="ready-pct">—</div>
+        <div class="bars" id="chart-ready" style="margin-top:16px;"></div>
       </div>
       <div class="panel">
         <h3>Client software</h3>
@@ -1238,7 +1414,7 @@ rejecttokens=1</pre></li>
     const sig = d.signalling;
     if (sig){
       const pct = Math.max(0, Math.min(100, sig.percent));
-      document.getElementById("sig-pct").innerHTML = sig.percent.toFixed(1) + "<small>% of last " + sig.blocks_scanned + " blocks</small>";
+      document.getElementById("sig-pct").innerHTML = sig.percent.toFixed(1) + "<small>% of " + sig.blocks_scanned + " blocks this period</small>";
       document.getElementById("sig-fill").style.width = pct + "%";
       document.getElementById("sig-thr").style.left = (sig.threshold_percent||55) + "%";
       const gap = (sig.threshold_percent||55) - sig.percent;
@@ -1253,6 +1429,10 @@ rejecttokens=1</pre></li>
     const ready = (a.by_bip110 && a.by_bip110["BIP-110 ready"]) || 0;
     const notReady = (a.by_bip110 && a.by_bip110["Not ready"]) || 0;
     const unknown = (a.by_bip110 && a.by_bip110["Unknown"]) || 0;
+    const readyTotal = a.total_nodes || (ready + notReady + unknown);
+    const readyPct = readyTotal ? (ready / readyTotal * 100) : 0;
+    const rpEl = document.getElementById("ready-pct");
+    if (rpEl) rpEl.innerHTML = readyPct.toFixed(1) + "<small>% of reachable nodes ready</small>";
     bars("chart-ready", [["Ready",ready],["Not ready",notReady],["Unknown",unknown]].filter(e=>e[1]>0),
       name => name==="Ready" ? cssVar("--good") : name==="Not ready" ? cssVar("--neutral") : cssVar("--muted"));
     // Implementation mix (top 6), Knots highlighted.
@@ -1266,6 +1446,374 @@ rejecttokens=1</pre></li>
   loadLive();
   setInterval(loadLive, 30000);
 </script>
+</body>
+</html>
+"####;
+
+/// Standalone "Support this project" page (served at `/support`). Self-contained styling
+/// matching the cyberpunk theme; `<!--__CARDS__-->` is replaced with the donation-method
+/// cards at render time (see `render_support_html`).
+const SUPPORT_TEMPLATE: &str = r####"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support · BIP-110</title>
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Support the BIP-110 crawler">
+<meta name="twitter:description" content="Send a few sats to support the live BIP-110 Bitcoin node crawler.">
+<meta name="twitter:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Support the BIP-110 crawler">
+<meta property="og:description" content="Send a few sats to support the live BIP-110 Bitcoin node crawler.">
+<meta property="og:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:url" content="https://bip110.xyz/support">
+<style>
+  :root {
+    --page:#06060f; --surface:#0c0e1e; --surface-2:#12152c;
+    --ink:#eaf2ff; --ink-2:#98a2ce; --muted:#5c6591;
+    --grid:#1a2044; --border:rgba(0,229,255,0.22);
+    --good:#00ff9c; --warn:#ffcb2b;
+    --neon:#00e5ff; --neon2:#ff2d95; --glow:rgba(0,229,255,0.55);
+    --radius:12px;
+    --mono:ui-monospace,"Cascadia Code","JetBrains Mono","Segoe UI Mono",Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--page); color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif; line-height:1.6;
+    position:relative; min-height:100vh; }
+  body::before { content:""; position:fixed; inset:0; z-index:-2; pointer-events:none;
+    background:
+      linear-gradient(var(--grid) 1px, transparent 1px) 0 0/44px 44px,
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0/44px 44px;
+    opacity:.5;
+    -webkit-mask-image: radial-gradient(ellipse at 50% 0%, #000 30%, transparent 85%);
+            mask-image: radial-gradient(ellipse at 50% 0%, #000 30%, transparent 85%); }
+  body::after { content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+    background: radial-gradient(1100px 620px at 50% -8%, var(--glow), transparent 70%); opacity:.28; }
+  .wrap { max-width:900px; margin:0 auto; padding:22px 20px 90px; }
+  nav { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:26px; }
+  nav .brand { color:var(--neon); font-family:var(--mono); letter-spacing:.14em; font-size:13px; }
+  nav .links { display:flex; gap:10px; }
+  nav a { color:var(--ink-2); text-decoration:none; font-family:var(--mono); font-size:12px;
+    text-transform:uppercase; letter-spacing:.08em; border:1px solid var(--border);
+    background:var(--surface); border-radius:8px; padding:8px 14px; transition:.15s; }
+  nav a:hover { color:var(--neon); border-color:var(--neon); box-shadow:0 0 12px var(--glow); }
+  a { color:var(--neon); text-decoration:none; }
+  .hero { text-align:center; padding:14px 0 6px; }
+  .hero h1 { font-family:var(--mono); font-size:clamp(26px,5vw,40px); margin:0 0 12px; font-weight:800;
+    text-transform:uppercase; letter-spacing:.08em; text-shadow:0 0 12px var(--glow), 0 0 30px var(--glow); }
+  .hero .lead { color:var(--ink-2); font-size:clamp(15px,2.2vw,18px); max-width:62ch; margin:0 auto; }
+  .methods { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:18px; margin-top:34px; }
+  .method { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+    padding:22px; text-align:center; position:relative; transition:.18s; }
+  .method:hover { border-color:var(--neon); box-shadow:0 0 22px var(--glow); }
+  .mhead { display:flex; align-items:baseline; justify-content:center; gap:10px; margin-bottom:16px; }
+  .mhead h2 { margin:0; font-family:var(--mono); font-size:18px; letter-spacing:.04em; color:var(--ink); text-transform:uppercase; }
+  .msub { font-size:11px; color:var(--muted); font-family:var(--mono); text-transform:uppercase; letter-spacing:.1em; }
+  .qr { display:block; margin:0 auto 16px; width:220px; height:220px; max-width:100%;
+    background:#fff; border-radius:12px; padding:10px; box-shadow:0 0 20px rgba(0,0,0,.4); }
+  .addr { font-family:var(--mono); font-size:12px; color:var(--ink-2); background:var(--surface-2);
+    border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:14px;
+    word-break:break-all; max-height:96px; overflow:auto; text-align:left; }
+  .mbtns { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
+  .btn { font-family:var(--mono); font-size:12px; text-transform:uppercase; letter-spacing:.06em;
+    border-radius:8px; padding:9px 16px; cursor:pointer; border:1px solid var(--border);
+    background:var(--surface-2); color:var(--ink); transition:.15s; text-decoration:none; display:inline-block; }
+  .btn:hover { border-color:var(--neon); box-shadow:0 0 12px var(--glow); }
+  .btn.open { background:var(--neon); color:var(--page); border-color:var(--neon); font-weight:700; }
+  .btn.open:hover { transform:translateY(-1px); box-shadow:0 0 20px var(--glow); }
+  .notice { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+    padding:22px; color:var(--ink-2); text-align:center; grid-column:1/-1; }
+  .thanks { text-align:center; color:var(--muted); font-size:13px; margin-top:34px; font-family:var(--mono); }
+  footer { margin-top:44px; color:var(--muted); font-size:11.5px; font-family:var(--mono); text-align:center; }
+  #toast { position:fixed; left:50%; bottom:30px; transform:translateX(-50%) translateY(20px);
+    background:var(--surface); border:1px solid var(--good); color:var(--good); font-family:var(--mono);
+    font-size:12px; padding:10px 18px; border-radius:10px;
+    box-shadow:0 0 18px color-mix(in srgb,var(--good) 40%,transparent);
+    opacity:0; pointer-events:none; transition:.2s; z-index:10; }
+  #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <span class="brand">▚ BIP-110</span>
+    <span class="links">
+      <a href="/">◂ Live crawler</a>
+      <a href="/why">Why BIP-110?</a>
+      <a href="/code">Code</a>
+    </span>
+  </nav>
+
+  <div class="hero">
+    <h1>Support this project ⚡</h1>
+    <p class="lead">The BIP-110 crawler runs continuously on independent hardware, mapping the
+      Bitcoin network across clearnet and Tor. If you find it useful, a few sats help keep it
+      online — scan a code or copy an address below. Thank you!</p>
+  </div>
+
+  <div class="methods">
+    <!--__CARDS__-->
+  </div>
+
+  <p class="thanks">Every sat is appreciated. 🧡</p>
+
+  <footer>bip110.xyz · non-custodial · donation details are served from the operator's machine, not stored in the repo</footer>
+</div>
+
+<div id="toast">Copied to clipboard ✓</div>
+
+<script>
+  const toast = document.getElementById("toast");
+  let toastT;
+  function showToast(msg){
+    toast.textContent = msg;
+    toast.classList.add("show");
+    clearTimeout(toastT);
+    toastT = setTimeout(()=>toast.classList.remove("show"), 1600);
+  }
+  document.querySelectorAll(".btn.copy").forEach(b => {
+    b.addEventListener("click", async () => {
+      const v = b.getAttribute("data-val") || "";
+      try { await navigator.clipboard.writeText(v); showToast("Copied to clipboard ✓"); }
+      catch(e){
+        // Fallback for insecure contexts / older browsers.
+        const t = document.createElement("textarea");
+        t.value = v; t.style.position = "fixed"; t.style.opacity = "0";
+        document.body.appendChild(t); t.select();
+        try { document.execCommand("copy"); showToast("Copied ✓"); } catch(_){ showToast("Copy failed"); }
+        document.body.removeChild(t);
+      }
+    });
+  });
+</script>
+</body>
+</html>
+"####;
+
+/// Standalone "BIP-110 code walkthrough" page (served at `/code`). Static content
+/// summarising the seven consensus rules and their implementation; adapted from the
+/// Bitcoin Knots walkthrough (attributed in the page footer).
+const CODE_TEMPLATE: &str = r####"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BIP-110 Code Walkthrough</title>
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="BIP-110 Code Walkthrough">
+<meta name="twitter:description" content="The seven consensus rules of BIP-110 and how they're implemented — small enough to review by hand.">
+<meta name="twitter:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:type" content="article">
+<meta property="og:title" content="BIP-110 Code Walkthrough">
+<meta property="og:description" content="The seven consensus rules of BIP-110 and how they're implemented — small enough to review by hand.">
+<meta property="og:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:url" content="https://bip110.xyz/code">
+<style>
+  :root {
+    --page:#06060f; --surface:#0c0e1e; --surface-2:#12152c;
+    --ink:#eaf2ff; --ink-2:#98a2ce; --muted:#5c6591;
+    --grid:#1a2044; --border:rgba(0,229,255,0.22);
+    --good:#00ff9c; --warn:#ffcb2b;
+    --neon:#00e5ff; --neon2:#ff2d95; --glow:rgba(0,229,255,0.55);
+    --radius:12px;
+    --mono:ui-monospace,"Cascadia Code","JetBrains Mono","Segoe UI Mono",Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--page); color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif; line-height:1.6;
+    position:relative; min-height:100vh; }
+  body::before { content:""; position:fixed; inset:0; z-index:-2; pointer-events:none;
+    background:
+      linear-gradient(var(--grid) 1px, transparent 1px) 0 0/44px 44px,
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0/44px 44px;
+    opacity:.5;
+    -webkit-mask-image: radial-gradient(ellipse at 50% 0%, #000 30%, transparent 85%);
+            mask-image: radial-gradient(ellipse at 50% 0%, #000 30%, transparent 85%); }
+  body::after { content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+    background: radial-gradient(1100px 620px at 50% -8%, var(--glow), transparent 70%); opacity:.28; }
+  .wrap { max-width:1000px; margin:0 auto; padding:22px 20px 90px; }
+  nav { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:26px; flex-wrap:wrap; }
+  nav .brand { color:var(--neon); font-family:var(--mono); letter-spacing:.14em; font-size:13px; }
+  nav a { color:var(--ink-2); text-decoration:none; font-family:var(--mono); font-size:12px;
+    text-transform:uppercase; letter-spacing:.08em; border:1px solid var(--border);
+    background:var(--surface); border-radius:8px; padding:8px 14px; transition:.15s; }
+  nav a:hover { color:var(--neon); border-color:var(--neon); box-shadow:0 0 12px var(--glow); }
+  a { color:var(--neon); text-decoration:none; } a:hover { text-shadow:0 0 8px var(--glow); }
+  .hero { text-align:center; padding:22px 0 8px; }
+  .tag { display:inline-block; font-family:var(--mono); font-size:11px; text-transform:uppercase;
+    letter-spacing:.16em; color:var(--neon2); border:1px solid color-mix(in srgb,var(--neon2) 45%, transparent);
+    border-radius:999px; padding:5px 14px; margin-bottom:18px;
+    box-shadow:0 0 14px color-mix(in srgb,var(--neon2) 30%, transparent); }
+  .hero h1 { font-family:var(--mono); font-size:clamp(26px,5vw,42px); margin:0 0 14px; font-weight:800;
+    text-transform:uppercase; letter-spacing:.06em; line-height:1.12;
+    text-shadow:0 0 12px var(--glow), 0 0 30px var(--glow); }
+  .hero h1 .accent { color:var(--neon); }
+  .hero .lead { color:var(--ink-2); font-size:clamp(15px,2.2vw,18px); max-width:74ch; margin:0 auto; }
+  section { margin-top:44px; }
+  section > h2 { font-family:var(--mono); font-size:16px; margin:0 0 6px; text-transform:uppercase;
+    letter-spacing:.1em; color:var(--neon); text-shadow:0 0 10px var(--glow); display:flex; align-items:center; gap:8px; }
+  section > h2::before { content:"//"; color:var(--neon2); opacity:.8; }
+  section .hint { color:var(--muted); font-size:13px; margin:0 0 18px; max-width:82ch; }
+  .grid { display:grid; gap:16px; }
+  .grid.two { grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
+  .panel { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:20px 22px; }
+  .panel h3 { margin:0 0 8px; font-size:15px; color:var(--ink); font-family:var(--mono); letter-spacing:.02em; }
+  .panel p { margin:0; color:var(--ink-2); font-size:14px; }
+  .rules { display:grid; gap:14px; }
+  .rule { display:flex; gap:16px; align-items:flex-start; background:var(--surface);
+    border:1px solid var(--border); border-radius:var(--radius); padding:18px 20px; transition:.18s; }
+  .rule:hover { border-color:var(--neon); box-shadow:0 0 18px var(--glow); }
+  .rule .rn { flex:none; width:34px; height:34px; display:flex; align-items:center; justify-content:center;
+    font-family:var(--mono); font-weight:800; font-size:16px; color:var(--page); background:var(--neon);
+    border-radius:9px; box-shadow:0 0 12px var(--glow); }
+  .rule h3 { margin:0 0 6px; font-size:15.5px; color:var(--ink); font-family:var(--mono); letter-spacing:.02em; }
+  .rule p { margin:0; color:var(--ink-2); font-size:14px; }
+  .files { display:flex; flex-direction:column; gap:10px; }
+  .file { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .file code:first-child { color:var(--neon); font-family:var(--mono); font-size:13px; font-weight:700; display:block; margin-bottom:5px; }
+  .file span { color:var(--ink-2); font-size:13.5px; }
+  code.inline, .file span code { background:var(--surface-2); border:1px solid var(--border); border-radius:5px;
+    padding:1px 6px; font-family:var(--mono); font-size:12.5px; color:var(--neon); }
+  .callout { border-left:3px solid var(--warn); background:color-mix(in srgb,var(--warn) 8%, var(--surface));
+    border-radius:8px; padding:14px 18px; color:var(--ink-2); font-size:13.5px; }
+  .callout b { color:var(--warn); }
+  .src { color:var(--muted); font-size:12.5px; margin-top:40px; font-family:var(--mono); text-align:center; line-height:1.7; }
+  .cta { text-align:center; margin-top:36px; }
+  .cta a.btn { display:inline-block; font-family:var(--mono); text-transform:uppercase; letter-spacing:.1em;
+    font-size:13px; color:var(--page); background:var(--neon); border-radius:10px; padding:14px 28px; font-weight:700;
+    box-shadow:0 0 22px var(--glow); transition:.18s; }
+  .cta a.btn:hover { transform:translateY(-2px); box-shadow:0 0 34px var(--glow); }
+  footer { margin-top:26px; color:var(--muted); font-size:11.5px; font-family:var(--mono); text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <span class="brand">▚ BIP-110</span>
+    <span style="display:flex; gap:10px; flex-wrap:wrap;">
+      <a href="/">◂ Live crawler</a>
+      <a href="/why">Why BIP-110?</a>
+      <a href="/support">⚡ Support</a>
+    </span>
+  </nav>
+
+  <div class="hero">
+    <span class="tag">Code walkthrough</span>
+    <h1>What <span class="accent">BIP-110</span> actually changes</h1>
+    <p class="lead">BIP-110 is deliberately tiny — in Bitcoin Knots it is <b>5 modified and 72 added
+      lines across 5 source files</b>, small enough to read end to end. It promotes a set of existing
+      standardness filters into consensus rules that reduce how much arbitrary data a transaction can
+      commit on-chain. Here are the seven rules and how each is enforced.</p>
+  </div>
+
+  <section>
+    <h2>The seven rules</h2>
+    <p class="hint">While BIP-110 is active, script validation runs with one new flag,
+      <code class="inline">SCRIPT_VERIFY_REDUCED_DATA</code>, which swaps in tighter limits. Each rule is a
+      consensus check that rejects a specific kind of oversized or arbitrary data.</p>
+    <div class="rules">
+      <div class="rule"><span class="rn">1</span><div><h3>Output size limit</h3>
+        <p>A new output's script may not exceed <b>34 bytes</b> — enough for standard payment outputs.
+          The one exception is a data output (<code class="inline">OP_RETURN</code>), allowed up to
+          <b>83 bytes</b>. Enforced by a new <code class="inline">CheckOutputSizes</code> function.</p></div></div>
+      <div class="rule"><span class="rn">2</span><div><h3>Data-push limit</h3>
+        <p>Individual data pushes and witness stack items may not exceed <b>256 bytes</b> (down from the
+          usual 520), via <code class="inline">MAX_SCRIPT_ELEMENT_SIZE_REDUCED</code>. A BIP16 P2SH
+          <code class="inline">redeemScript</code> push is exempted so existing P2SH keeps working.</p></div></div>
+      <div class="rule"><span class="rn">3</span><div><h3>Undefined witness versions</h3>
+        <p>Spending an output with an <b>undefined witness version</b> becomes invalid (creating one stays
+          valid). This also closes a Bitcoin Core edge case around anchor outputs.</p></div></div>
+      <div class="rule"><span class="rn">4</span><div><h3>Taproot annex rejected</h3>
+        <p>A witness stack that carries a Taproot <b>annex</b> is invalid. Previously the annex was merely
+          non-standard policy; BIP-110 makes rejecting it a consensus rule.</p></div></div>
+      <div class="rule"><span class="rn">5</span><div><h3>Control-block size limit</h3>
+        <p>A Taproot <b>control block</b> larger than <b>257 bytes</b> is invalid
+          (<code class="inline">TAPROOT_CONTROL_MAX_SIZE_REDUCED</code>) — still enough for a merkle tree of
+          128 script leaves.</p></div></div>
+      <div class="rule"><span class="rn">6</span><div><h3>No OP_SUCCESS</h3>
+        <p>A tapscript that contains an <code class="inline">OP_SUCCESS</code> opcode <b>anywhere</b> is
+          invalid, closing off a large class of otherwise-unconstrained script data.</p></div></div>
+      <div class="rule"><span class="rn">7</span><div><h3>No OP_IF / OP_NOTIF</h3>
+        <p>A tapscript that <b>executes</b> <code class="inline">OP_IF</code> or
+          <code class="inline">OP_NOTIF</code> is invalid, reusing the existing minimal-IF error as a
+          stricter form of the same restriction.</p></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>How it stays backwards-compatible</h2>
+    <div class="grid two">
+      <div class="panel"><h3>Grandfathering, per input</h3>
+        <p>Nothing already on the chain is retroactively invalidated. Rules apply <b>per input</b>: each
+          input is judged against the block height of the output it spends. Inputs spending outputs created
+          <em>before</em> activation have the reduced-data flags cleared individually
+          (<code class="inline">flags_per_input</code> in <code class="inline">CheckInputScripts</code>,
+          gated on <code class="inline">reduced_data_start_height</code>). Because flags now vary per input,
+          the script-verification cache is bypassed when that happens.</p></div>
+      <div class="panel"><h3>Where it's enforced</h3>
+        <p>Most checks live in the interpreter behind
+          <code class="inline">SCRIPT_VERIFY_REDUCED_DATA</code>. The output-size rule runs in
+          <code class="inline">CheckTxInputs</code> (not <code class="inline">CheckTransaction</code>, which
+          can't see deployment status), and the coinbase/generation transaction — which has no inputs —
+          gets an explicit <code class="inline">CheckOutputSizes</code> call so Rule 1 applies chain-wide.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Activation &amp; expiry — a temporary soft fork</h2>
+    <p class="hint">BIP-110 extends the BIP9 version-bits state machine with BIP8-style mandatory
+      signalling and a new terminal state, so the fork is guaranteed to activate and then automatically
+      lapses.</p>
+    <div class="grid two">
+      <div class="panel"><h3>Mandatory signalling</h3>
+        <p>In the retarget period(s) just before the deadline
+          (<code class="inline">max_activation_height</code>), blocks that do <b>not</b> set version bit 4
+          are rejected as invalid (<code class="inline">DeploymentMustSignalAfter</code>, checked by a new
+          <code class="inline">ContextualCheckBlockHeaderVolatile</code>). One period before the deadline,
+          the state is <b>forced to LOCKED_IN</b> regardless of the signalling percentage — so lock-in is
+          guaranteed no later than the deadline.</p></div>
+      <div class="panel"><h3>Automatic expiry</h3>
+        <p>A new <code class="inline">active_duration</code> (52,416 blocks, ~1 year) makes the deployment
+          <b>temporary</b>. Once <code class="inline">activation_height + active_duration</code> is reached,
+          the state machine moves from <b>ACTIVE</b> to a new terminal <b>EXPIRED</b> state
+          (<code class="inline">DeploymentActiveAfter</code>): the reduced-data rules stop being enforced and
+          outputs are unrestricted again.</p></div>
+    </div>
+    <div class="callout" style="margin-top:16px;">The activation threshold is a per-deployment <b>55%</b>
+      of a 2016-block difficulty period (1109 blocks), overriding the usual 95% — a small change to the
+      <code class="inline">Threshold</code> logic in <code class="inline">versionbits.cpp</code>.</div>
+  </section>
+
+  <section>
+    <h2>The five files</h2>
+    <div class="files">
+      <div class="file"><code>src/consensus/tx_verify.cpp</code><span>New <code>CheckOutputSizes</code> — Rule 1 (output and data-carrier size limits).</span></div>
+      <div class="file"><code>src/script/interpreter.cpp</code><span>Reduced element &amp; control-block sizes, annex rejection, OP_IF/OP_NOTIF, the P2SH <code>redeemScript</code> exemption, and the anchor-output fix — Rules 2, 4, 5, 7 (and 3).</span></div>
+      <div class="file"><code>src/validation.cpp</code><span>Per-input grandfathering (<code>flags_per_input</code>), the coinbase output check, and block-header mandatory-signalling checks.</span></div>
+      <div class="file"><code>src/deploymentstatus.h</code><span><code>DeploymentActiveAfter</code> (temporary-fork expiry) and <code>DeploymentMustSignalAfter</code> (mandatory-signalling window).</span></div>
+      <div class="file"><code>src/versionbits.cpp</code><span>Forced LOCKED_IN before the deadline, the ACTIVE → EXPIRED transition, and the per-deployment 55% threshold.</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Why it's reviewable</h2>
+    <div class="callout">The point of keeping BIP-110 to a few dozen lines is that <b>you don't have to be a
+      C++ developer to audit it</b>. Most rules simply promote limits nodes already apply as policy into
+      consensus, guarded by a single flag. The per-input grandfathering and the temporary-expiry state are
+      the only genuinely new machinery.</div>
+  </section>
+
+  <p class="src">Summarised from the
+    <a href="https://bitcoinknots.org/learn/bip110-code-walkthrough.html" target="_blank" rel="noopener">Bitcoin Knots BIP-110 code walkthrough</a>
+    · full specification:
+    <a href="https://github.com/bitcoin/bips/blob/master/bip-0110.mediawiki" target="_blank" rel="noopener">BIP-110</a>.
+    Descriptions are paraphrased — see the sources for the exact code.</p>
+
+  <div class="cta"><a class="btn" href="/">▚ Back to the live network →</a></div>
+  <footer>bip110.xyz · a live BIP-110 node crawler</footer>
+</div>
 </body>
 </html>
 "####;

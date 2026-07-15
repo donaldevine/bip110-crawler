@@ -10,6 +10,11 @@
 crawl.bat
 serve.bat
 
+# Donation details for the /support page — served at runtime, never committed
+assets/support.json
+assets/bitcoin.png
+assets/lightning.png
+
 # Runtime data (keep assets/world.min.json, which is committed)
 geo-cache.json
 history.json

@@ -130,7 +130,12 @@ impl RpcClient {
         let mask: i64 = 1 << bit;
         let mut signalling = 0u32;
         let mut scanned = 0u32;
-        let start = (tip - window as i64 + 1).max(0);
+        // Count within the CURRENT difficulty adjustment period (retarget-aligned), not a
+        // rolling "last `window` blocks" window. BIP9/BIP8 tally signalling per 2016-block
+        // period and evaluate lock-in at the retarget boundary, so we scan from the first
+        // block of the current period (height divisible by the period) up to the tip.
+        let period = (window as i64).max(1);
+        let start = (tip / period) * period;
         for h in start..=tip {
             let hash = self.call("getblockhash", json!([h]))?;
             let hash = hash.as_str().ok_or_else(|| anyhow!("getblockhash: not str"))?;
@@ -158,6 +163,13 @@ impl RpcClient {
             threshold_percent: 55.0, // BIP-110: 1109/2016
             tip_height: tip,
         })
+    }
+
+    /// Current best-block height (`getblockcount`) — a cheap tip check used to decide
+    /// whether a fresh (expensive) signalling scan is warranted.
+    pub fn block_count(&self) -> Result<i64> {
+        let v = self.call("getblockcount", json!([]))?;
+        v.as_i64().ok_or_else(|| anyhow!("getblockcount: not an integer"))
     }
 }
 

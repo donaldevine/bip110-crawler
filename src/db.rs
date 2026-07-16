@@ -64,9 +64,15 @@ pub fn write_snapshot(
     let tx = conn.transaction()?;
     // Upsert (no DELETE): rows accumulate and multiple crawlers can share the DB.
     {
-        // Upsert by address. On conflict we refresh the live fields but keep any existing
-        // geolocation when the incoming write has none (COALESCE), so a crawler that isn't
-        // geolocating can't blank out coordinates another crawler already resolved.
+        // Upsert by address. Two rules keep concurrent crawlers from fighting:
+        //  * The trailing WHERE means a write that did NOT handshake the peer (a failed
+        //    probe: online=false, implementation="Unreachable") can never overwrite a row
+        //    another crawler successfully handshook. Without this, a Tor-focused crawler
+        //    that skips/fails clearnet peers would flip them offline every snapshot and the
+        //    totals would oscillate. Better information always wins; a failed probe only
+        //    updates a row that was itself never handshook.
+        //  * COALESCE keeps existing geolocation when the incoming write has none, so a
+        //    crawler that isn't geolocating can't blank coordinates another one resolved.
         let mut ins = tx.prepare(
             "INSERT INTO nodes
              (addr,depth,protocol_version,user_agent,services,start_height,handshaked,
@@ -84,7 +90,8 @@ pub fn write_snapshot(
                lat=COALESCE(excluded.lat, lat), lon=COALESCE(excluded.lon, lon),
                country=COALESCE(excluded.country, country),
                country_code=COALESCE(excluded.country_code, country_code),
-               city=COALESCE(excluded.city, city)",
+               city=COALESCE(excluded.city, city)
+             WHERE excluded.handshaked=1 OR nodes.handshaked=0",
         )?;
         for n in nodes {
             let g = geo.get(&n.addr);
@@ -382,6 +389,60 @@ mod tests {
             version: "27.0.0".into(), bip110: Bip110Stance::NotEnforcing,
             first_seen: String::new(), last_seen: String::new(), times_seen: 0, online,
         }
+    }
+
+    /// What a crawler records when it fails to reach a peer (see crawler.rs).
+    fn unreachable(addr: &str) -> NodeInfo {
+        NodeInfo {
+            addr: addr.into(), depth: 9, protocol_version: 0, user_agent: String::new(),
+            services: 0, start_height: 0, handshaked: false,
+            implementation: "Unreachable".into(), version: String::new(),
+            bip110: Bip110Stance::Unknown, first_seen: String::new(),
+            last_seen: String::new(), times_seen: 0, online: false,
+        }
+    }
+
+    fn own_stub() -> OwnNode {
+        OwnNode {
+            addr: "self".into(), version: 0, subversion: "x".into(),
+            implementation: "Bitcoin Core".into(), network: "main".into(),
+        }
+    }
+
+    #[test]
+    fn failed_probe_never_clobbers_a_successful_one() {
+        let path = std::env::temp_dir()
+            .join(format!("bip110_db_clobber_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = open(&path).unwrap();
+        let own = own_stub();
+        let addr = "9.9.9.9:8333";
+
+        // Crawler A handshakes the peer: online.
+        write_snapshot(&mut conn, "t1", "main", &own, &None, &[node(addr, true)], &[], &BTreeMap::new()).unwrap();
+        // Crawler B (e.g. Tor-focused) fails to reach the same peer and would mark it
+        // Unreachable/offline. It must NOT overwrite A's successful handshake.
+        write_snapshot(&mut conn, "t2", "main", &own, &None, &[unreachable(addr)], &[], &BTreeMap::new()).unwrap();
+
+        let (online, impl_): (i64, String) = conn.query_row(
+            "SELECT online, implementation FROM nodes WHERE addr=?1", params![addr],
+            |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(online, 1, "a failed probe must not flip a handshaked node offline");
+        assert_eq!(impl_, "Bitcoin Core", "a failed probe must not overwrite the client name");
+
+        // But a later SUCCESSFUL probe is better information and does win.
+        write_snapshot(&mut conn, "t3", "main", &own, &None, &[node(addr, true)], &[], &BTreeMap::new()).unwrap();
+        let ls: String = conn.query_row(
+            "SELECT last_seen FROM nodes WHERE addr=?1", params![addr], |r| r.get(0)).unwrap();
+        assert_eq!(ls, "t3", "a handshaked write should refresh the row");
+
+        // And an unreachable peer nobody has handshaked is still recorded.
+        write_snapshot(&mut conn, "t4", "main", &own, &None, &[unreachable("8.8.8.8:8333")], &[], &BTreeMap::new()).unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE addr='8.8.8.8:8333'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

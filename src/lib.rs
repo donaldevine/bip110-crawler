@@ -11,3 +11,4 @@ pub mod report;
 pub mod rpc;
 pub mod serve;
 pub mod state;
+pub mod time;

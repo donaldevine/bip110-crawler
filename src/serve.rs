@@ -45,7 +45,9 @@ fn load_support() -> Support {
     Support { html, btc_qr, ln_qr }
 }
 
-pub fn serve(db_path: &Path, port: u16) -> Result<()> {
+/// Serve the pages + API from `db_path`. `max_age_secs` is the freshness window: nodes
+/// not confirmed reachable within it are treated as gone (0 disables aging).
+pub fn serve(db_path: &Path, port: u16, max_age_secs: u64) -> Result<()> {
     let server = tiny_http::Server::http(("127.0.0.1", port))
         .map_err(|e| anyhow!("binding 127.0.0.1:{port}: {e}"))?;
     let server = Arc::new(server);
@@ -76,7 +78,7 @@ pub fn serve(db_path: &Path, port: u16) -> Result<()> {
             };
             loop {
                 match server.recv() {
-                    Ok(req) => handle(&conn, &page, &support, req),
+                    Ok(req) => handle(&conn, &page, &support, max_age_secs, req),
                     Err(_) => break,
                 }
             }
@@ -95,7 +97,13 @@ fn html_header() -> tiny_http::Header {
     tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap()
 }
 
-fn handle(conn: &rusqlite::Connection, page: &str, support: &Support, req: tiny_http::Request) {
+fn handle(
+    conn: &rusqlite::Connection,
+    page: &str,
+    support: &Support,
+    max_age_secs: u64,
+    req: tiny_http::Request,
+) {
     let url = req.url().to_string();
     let (path, query) = match url.split_once('?') {
         Some((p, q)) => (p, parse_query(q)),
@@ -152,7 +160,7 @@ fn handle(conn: &rusqlite::Connection, page: &str, support: &Support, req: tiny_
         "/" | "/index.html" => Ok((page.to_string(), html_header())),
         "/api/report" => {
             let max = query.get("max").and_then(|s| s.parse().ok()).unwrap_or(3000);
-            db::read_report(conn, max)
+            db::read_report(conn, max, max_age_secs)
                 .and_then(|r| Ok(serde_json::to_string(&r)?))
                 .map(|s| (s, json_header()))
         }
@@ -165,7 +173,7 @@ fn handle(conn: &rusqlite::Connection, page: &str, support: &Support, req: tiny_
             let dir_desc = query.get("dir").map(|s| s == "desc").unwrap_or(false);
             let limit = query.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).min(1000);
             let offset = query.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0);
-            db::read_nodes(conn, q, impl_, bip, sort, dir_desc, limit, offset)
+            db::read_nodes(conn, q, impl_, bip, sort, dir_desc, limit, offset, max_age_secs)
                 .and_then(|(rows, total)| {
                     Ok(serde_json::to_string(&serde_json::json!({
                         "total": total, "rows": rows

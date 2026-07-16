@@ -48,8 +48,9 @@ fn stance_str(s: &Bip110Stance) -> &'static str {
 }
 /// Merge the current crawl snapshot into the DB (one transaction). Rows are upserted by
 /// address, not wiped — the DB accumulates across snapshots/restarts and tolerates
-/// multiple concurrent crawlers writing to it. Online nodes get their `last_seen` stamped
-/// with `generated_at`; offline (historical) nodes keep their prior `last_seen`.
+/// multiple concurrent crawlers writing to it. `last_seen` carries the crawler's
+/// probe-time stamp (when the peer was last confirmed reachable), which the API uses to
+/// age out rows that stopped being re-confirmed.
 #[allow(clippy::too_many_arguments)]
 pub fn write_snapshot(
     conn: &mut Connection,
@@ -95,9 +96,15 @@ pub fn write_snapshot(
         )?;
         for n in nodes {
             let g = geo.get(&n.addr);
-            // Stamp last_seen with this crawl's time for nodes seen now (online); offline
-            // history rows keep their prior last_seen so aging stays meaningful.
-            let last_seen: &str = if n.online { generated_at } else { &n.last_seen };
+            // last_seen must mean "last CONFIRMED reachable", so we keep the crawler's
+            // probe-time stamp verbatim — stamping it at write time would refresh every
+            // row on every snapshot and nothing would ever age out. The fallback only
+            // covers online rows with no stamp of their own (e.g. the spliced own node).
+            let last_seen: &str = if n.last_seen.is_empty() && n.online {
+                generated_at
+            } else {
+                &n.last_seen
+            };
             ins.execute(params![
                 n.addr, n.depth, n.protocol_version, n.user_agent, n.services as i64,
                 n.start_height, n.handshaked as i64, n.implementation, n.version,
@@ -172,12 +179,36 @@ fn row_to_node(r: &rusqlite::Row) -> rusqlite::Result<(NodeInfo, Option<GeoInfo>
     Ok((node, geo))
 }
 
+/// SQL predicate for "currently reachable": online, and — unless aging is disabled with
+/// `max_age_secs = 0` — confirmed reachable within that window.
+///
+/// Because the crawler never re-probes a peer inside one pass, and a failed probe can't
+/// overwrite a successful one, `online` alone is effectively sticky: without aging, dead
+/// nodes would linger forever and the totals would only ever grow. Aging is what keeps
+/// them honest — a re-crawl refreshes `last_seen` for peers that are still up, and peers
+/// that stop answering simply fall out of the window.
+///
+/// The cutoff is generated internally by `time::iso_secs_ago` (fixed-width, digits and
+/// `-:TZ` only), so inlining it carries no injection risk and keeps the callers simple.
+fn fresh_clause(max_age_secs: u64) -> String {
+    if max_age_secs == 0 {
+        "online=1".to_string()
+    } else {
+        format!(
+            "online=1 AND last_seen >= '{}'",
+            crate::time::iso_secs_ago(max_age_secs)
+        )
+    }
+}
+
 /// Build a bounded ReportData for the maps/charts/summary: all reachable nodes plus a
 /// sample of the rest up to `max`, their edges, geo, and full aggregate counts.
-pub fn read_report(conn: &Connection, max: usize) -> Result<ReportData> {
-    // The website only exposes reachable (online) nodes.
+/// `max_age_secs` drops nodes not confirmed reachable recently (0 = keep everything).
+pub fn read_report(conn: &Connection, max: usize, max_age_secs: u64) -> Result<ReportData> {
+    // The website only exposes reachable (online) nodes, recently confirmed.
+    let fresh = fresh_clause(max_age_secs);
     let reachable_total: usize = conn
-        .query_row("SELECT count(*) FROM nodes WHERE online=1", [], |r| {
+        .query_row(&format!("SELECT count(*) FROM nodes WHERE {fresh}"), [], |r| {
             r.get::<_, i64>(0)
         })
         .unwrap_or(0) as usize;
@@ -201,9 +232,9 @@ pub fn read_report(conn: &Connection, max: usize) -> Result<ReportData> {
     let mut agg = Aggregates::default();
     agg.total_nodes = reachable_total;
     {
-        let mut st = conn.prepare(
-            "SELECT implementation, version, user_agent, online, handshaked, addr FROM nodes WHERE online=1",
-        )?;
+        let mut st = conn.prepare(&format!(
+            "SELECT implementation, version, user_agent, online, handshaked, addr FROM nodes WHERE {fresh}"
+        ))?;
         let rows = st.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -238,11 +269,11 @@ pub fn read_report(conn: &Connection, max: usize) -> Result<ReportData> {
     let mut nodes = Vec::new();
     let mut geo = BTreeMap::new();
     {
-        let mut st = conn.prepare(
+        let mut st = conn.prepare(&format!(
             // depth=0 (the own node) is pinned first so it always survives the cap and
             // shows on the maps, not just the uncapped table.
-            "SELECT * FROM nodes WHERE online=1 ORDER BY (depth=0) DESC, times_seen DESC LIMIT ?1",
-        )?;
+            "SELECT * FROM nodes WHERE {fresh} ORDER BY (depth=0) DESC, times_seen DESC LIMIT ?1"
+        ))?;
         let rows = st.query_map(params![max as i64], row_to_node)?;
         for row in rows {
             let (n, g) = row?;
@@ -302,6 +333,7 @@ pub struct NodeRow {
 /// happens in SQL; BIP-110 readiness is derived from the user agent, so the `bip` filter,
 /// sort, and pagination are applied in memory — the reachable set is a few thousand rows,
 /// so this is cheap and keeps the counts exact.
+#[allow(clippy::too_many_arguments)]
 pub fn read_nodes(
     conn: &Connection,
     q: &str,
@@ -311,8 +343,9 @@ pub fn read_nodes(
     dir_desc: bool,
     limit: usize,
     offset: usize,
+    max_age_secs: u64,
 ) -> Result<(Vec<NodeRow>, usize)> {
-    let mut where_clauses = vec!["online=1".to_string()];
+    let mut where_clauses = vec![fresh_clause(max_age_secs)];
     let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if !implementation.is_empty() {
         where_clauses.push(format!("implementation=?{}", args.len() + 1));
@@ -407,6 +440,38 @@ mod tests {
             addr: "self".into(), version: 0, subversion: "x".into(),
             implementation: "Bitcoin Core".into(), network: "main".into(),
         }
+    }
+
+    #[test]
+    fn aging_drops_nodes_not_confirmed_recently() {
+        let path = std::env::temp_dir().join(format!("bip110_db_age_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = open(&path).unwrap();
+        let own = own_stub();
+
+        // One peer confirmed just now, one confirmed 10 days ago.
+        let mut fresh = node("5.5.5.5:8333", true);
+        fresh.last_seen = crate::time::now_iso();
+        let mut stale = node("6.6.6.6:8333", true);
+        stale.last_seen = crate::time::iso_secs_ago(10 * 24 * 3600);
+        write_snapshot(&mut conn, "t1", "main", &own, &None, &[fresh, stale], &[], &BTreeMap::new()).unwrap();
+
+        // No aging: both are reachable.
+        let r = read_report(&conn, 100, 0).unwrap();
+        assert_eq!(r.aggregates.total_nodes, 2, "aging disabled keeps everything");
+
+        // 48h window: the 10-day-old node ages out, the fresh one stays.
+        let r = read_report(&conn, 100, 48 * 3600).unwrap();
+        assert_eq!(r.aggregates.total_nodes, 1, "stale node should age out");
+        assert_eq!(r.nodes.len(), 1);
+        assert_eq!(r.nodes[0].addr, "5.5.5.5:8333");
+
+        // The table endpoint agrees.
+        let (rows, total) = read_nodes(&conn, "", "", "", "depth", false, 100, 0, 48 * 3600).unwrap();
+        assert_eq!(total, 1, "read_nodes should apply the same window");
+        assert_eq!(rows[0].addr, "5.5.5.5:8333");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

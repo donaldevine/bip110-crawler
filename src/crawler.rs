@@ -389,7 +389,9 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
                     version,
                     bip110,
                     first_seen: String::new(),
-                    last_seen: String::new(),
+                    // Stamped at PROBE time (not write time): this is when the peer was
+                    // last confirmed reachable, which is what the API ages rows against.
+                    last_seen: crate::time::now_iso(),
                     times_seen: 0,
                     online: true,
                 };

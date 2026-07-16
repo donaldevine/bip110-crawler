@@ -1,8 +1,10 @@
 //! SQLite storage + read queries powering the API (`serve` mode).
 //!
-//! The crawler writes the full node/edge/geo set here; the API server reads it. The DB
-//! mirrors the current known set each write (delete + insert in one transaction), so
-//! `online` flags etc. stay accurate. It's a single file (`crawl.db`), no server needed.
+//! The crawler writes the node/edge/geo set here; the API server reads it. Each write is a
+//! per-row **upsert** (INSERT … ON CONFLICT by address), so the DB *accumulates* across
+//! snapshots and restarts and never drops rows. This means multiple crawlers (e.g. a
+//! clearnet and a Tor-focused one, each with its own state file) can write to the same DB
+//! concurrently without wiping each other. It's a single file (`crawl.db`), no server needed.
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
@@ -44,7 +46,10 @@ fn stance_str(s: &Bip110Stance) -> &'static str {
         Bip110Stance::Unknown => "unknown",
     }
 }
-/// Replace the DB contents with the current crawl snapshot (one transaction).
+/// Merge the current crawl snapshot into the DB (one transaction). Rows are upserted by
+/// address, not wiped — the DB accumulates across snapshots/restarts and tolerates
+/// multiple concurrent crawlers writing to it. Online nodes get their `last_seen` stamped
+/// with `generated_at`; offline (historical) nodes keep their prior `last_seen`.
 #[allow(clippy::too_many_arguments)]
 pub fn write_snapshot(
     conn: &mut Connection,
@@ -57,22 +62,39 @@ pub fn write_snapshot(
     geo: &BTreeMap<String, GeoInfo>,
 ) -> Result<()> {
     let tx = conn.transaction()?;
-    tx.execute("DELETE FROM nodes", [])?;
-    tx.execute("DELETE FROM edges", [])?;
+    // Upsert (no DELETE): rows accumulate and multiple crawlers can share the DB.
     {
+        // Upsert by address. On conflict we refresh the live fields but keep any existing
+        // geolocation when the incoming write has none (COALESCE), so a crawler that isn't
+        // geolocating can't blank out coordinates another crawler already resolved.
         let mut ins = tx.prepare(
-            "INSERT OR REPLACE INTO nodes
+            "INSERT INTO nodes
              (addr,depth,protocol_version,user_agent,services,start_height,handshaked,
               implementation,version,bip110,first_seen,last_seen,times_seen,online,
               lat,lon,country,country_code,city)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+             ON CONFLICT(addr) DO UPDATE SET
+               depth=excluded.depth, protocol_version=excluded.protocol_version,
+               user_agent=excluded.user_agent, services=excluded.services,
+               start_height=excluded.start_height, handshaked=excluded.handshaked,
+               implementation=excluded.implementation, version=excluded.version,
+               bip110=excluded.bip110, first_seen=excluded.first_seen,
+               last_seen=excluded.last_seen, times_seen=excluded.times_seen,
+               online=excluded.online,
+               lat=COALESCE(excluded.lat, lat), lon=COALESCE(excluded.lon, lon),
+               country=COALESCE(excluded.country, country),
+               country_code=COALESCE(excluded.country_code, country_code),
+               city=COALESCE(excluded.city, city)",
         )?;
         for n in nodes {
             let g = geo.get(&n.addr);
+            // Stamp last_seen with this crawl's time for nodes seen now (online); offline
+            // history rows keep their prior last_seen so aging stays meaningful.
+            let last_seen: &str = if n.online { generated_at } else { &n.last_seen };
             ins.execute(params![
                 n.addr, n.depth, n.protocol_version, n.user_agent, n.services as i64,
                 n.start_height, n.handshaked as i64, n.implementation, n.version,
-                stance_str(&n.bip110), n.first_seen, n.last_seen, n.times_seen, n.online as i64,
+                stance_str(&n.bip110), n.first_seen, last_seen, n.times_seen, n.online as i64,
                 g.map(|x| x.lat), g.map(|x| x.lon),
                 g.map(|x| x.country.clone()), g.map(|x| x.country_code.clone()),
                 g.map(|x| x.city.clone()),
@@ -173,7 +195,7 @@ pub fn read_report(conn: &Connection, max: usize) -> Result<ReportData> {
     agg.total_nodes = reachable_total;
     {
         let mut st = conn.prepare(
-            "SELECT implementation, version, user_agent, online, handshaked FROM nodes WHERE online=1",
+            "SELECT implementation, version, user_agent, online, handshaked, addr FROM nodes WHERE online=1",
         )?;
         let rows = st.query_map([], |r| {
             Ok((
@@ -182,10 +204,11 @@ pub fn read_report(conn: &Connection, max: usize) -> Result<ReportData> {
                 r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)? != 0,
                 r.get::<_, i64>(4)? != 0,
+                r.get::<_, String>(5)?,
             ))
         })?;
         for row in rows {
-            let (impl_, version, user_agent, online, handshaked) = row?;
+            let (impl_, version, user_agent, online, handshaked, addr) = row?;
             *agg.by_implementation.entry(impl_.clone()).or_default() += 1;
             let vkey = if version.is_empty() { impl_.clone() } else { format!("{impl_} {version}") };
             *agg.by_version.entry(vkey).or_default() += 1;
@@ -198,6 +221,9 @@ pub fn read_report(conn: &Connection, max: usize) -> Result<ReportData> {
             *agg.by_bip110.entry(label.to_string()).or_default() += 1;
             if handshaked { agg.handshaked_nodes += 1; }
             if online { agg.online_nodes += 1; }
+            // Count Tor nodes over the FULL reachable set (not the size-capped node list),
+            // so the dashboard's "Tor nodes" figure is exact even when the report is capped.
+            if addr.contains(".onion") { agg.onion_nodes += 1; }
         }
     }
 
@@ -206,7 +232,9 @@ pub fn read_report(conn: &Connection, max: usize) -> Result<ReportData> {
     let mut geo = BTreeMap::new();
     {
         let mut st = conn.prepare(
-            "SELECT * FROM nodes WHERE online=1 ORDER BY times_seen DESC LIMIT ?1",
+            // depth=0 (the own node) is pinned first so it always survives the cap and
+            // shows on the maps, not just the uncapped table.
+            "SELECT * FROM nodes WHERE online=1 ORDER BY (depth=0) DESC, times_seen DESC LIMIT ?1",
         )?;
         let rows = st.query_map(params![max as i64], row_to_node)?;
         for row in rows {
@@ -262,26 +290,21 @@ pub struct NodeRow {
     pub country: Option<String>,
 }
 
-/// Paginated + filtered node list for the table. Returns (rows, total-matching).
+/// Paginated + filtered node list for the table (all reachable nodes, not the capped
+/// report set). Returns (page-of-rows, total-matching). Filtering by `q`/`implementation`
+/// happens in SQL; BIP-110 readiness is derived from the user agent, so the `bip` filter,
+/// sort, and pagination are applied in memory — the reachable set is a few thousand rows,
+/// so this is cheap and keeps the counts exact.
 pub fn read_nodes(
     conn: &Connection,
     q: &str,
     implementation: &str,
-    reachable_only: bool,
+    bip: &str,
     sort: &str,
+    dir_desc: bool,
     limit: usize,
     offset: usize,
 ) -> Result<(Vec<NodeRow>, usize)> {
-    // Whitelist sort columns to avoid injection.
-    let sort_col = match sort {
-        "implementation" => "implementation",
-        "version" => "version",
-        "depth" => "depth",
-        "country" => "country",
-        "online" => "online",
-        _ => "last_seen",
-    };
-    let _ = reachable_only; // the site never serves unreachable nodes
     let mut where_clauses = vec!["online=1".to_string()];
     let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if !implementation.is_empty() {
@@ -296,44 +319,104 @@ pub fn read_nodes(
         ));
         args.push(Box::new(like));
     }
-    let where_sql = if where_clauses.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", where_clauses.join(" AND "))
-    };
+    let where_sql = format!("WHERE {}", where_clauses.join(" AND "));
     let arg_refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-
-    let total: usize = conn.query_row(
-        &format!("SELECT COUNT(*) FROM nodes {where_sql}"),
-        arg_refs.as_slice(),
-        |r| r.get::<_, i64>(0),
-    )? as usize;
 
     let sql = format!(
         "SELECT addr,implementation,version,protocol_version,depth,user_agent,online,last_seen,city,country
-         FROM nodes {where_sql} ORDER BY {sort_col} DESC LIMIT {limit} OFFSET {offset}"
+         FROM nodes {where_sql}"
     );
     let mut st = conn.prepare(&sql)?;
-    let rows = st.query_map(arg_refs.as_slice(), |r| {
-        let implementation: String = r.get(1)?;
-        let user_agent: String = r.get(5)?;
-        Ok(NodeRow {
-            addr: r.get(0)?,
-            implementation: implementation.clone(),
-            version: r.get(2)?,
-            protocol_version: r.get(3)?,
-            depth: r.get(4)?,
-            // Readiness derived from the user agent (current rule), not the stored label.
-            bip110: stance_str(&assess_bip110(&implementation, &user_agent, &[])).to_string(),
-            online: r.get::<_, i64>(6)? != 0,
-            last_seen: r.get(7)?,
-            city: r.get(8)?,
-            country: r.get(9)?,
-        })
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
+    let mut rows: Vec<NodeRow> = st
+        .query_map(arg_refs.as_slice(), |r| {
+            let implementation: String = r.get(1)?;
+            let user_agent: String = r.get(5)?;
+            Ok(NodeRow {
+                addr: r.get(0)?,
+                implementation: implementation.clone(),
+                version: r.get(2)?,
+                protocol_version: r.get(3)?,
+                depth: r.get(4)?,
+                // Readiness derived from the user agent (current rule), not the stored label.
+                bip110: stance_str(&assess_bip110(&implementation, &user_agent, &[])).to_string(),
+                online: r.get::<_, i64>(6)? != 0,
+                last_seen: r.get(7)?,
+                city: r.get(8)?,
+                country: r.get(9)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    if !bip.is_empty() {
+        rows.retain(|r| r.bip110 == bip);
     }
-    Ok((out, total))
+    let total = rows.len();
+
+    // Sort ascending by the requested column, then reverse for descending.
+    match sort {
+        "implementation" => rows.sort_by(|a, b| a.implementation.cmp(&b.implementation)),
+        "version" => rows.sort_by(|a, b| a.version.cmp(&b.version)),
+        "protocol_version" => rows.sort_by(|a, b| a.protocol_version.cmp(&b.protocol_version)),
+        "bip110" => rows.sort_by(|a, b| a.bip110.cmp(&b.bip110)),
+        "location" | "country" => rows.sort_by(|a, b| a.country.cmp(&b.country)),
+        _ => rows.sort_by(|a, b| a.depth.cmp(&b.depth)),
+    }
+    if dir_desc {
+        rows.reverse();
+    }
+
+    let page = rows.into_iter().skip(offset).take(limit).collect();
+    Ok((page, total))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::Bip110Stance;
+
+    fn node(addr: &str, online: bool) -> NodeInfo {
+        NodeInfo {
+            addr: addr.into(), depth: 1, protocol_version: 70016,
+            user_agent: "/Satoshi:27.0.0/".into(), services: 0, start_height: 0,
+            handshaked: online, implementation: "Bitcoin Core".into(),
+            version: "27.0.0".into(), bip110: Bip110Stance::NotEnforcing,
+            first_seen: String::new(), last_seen: String::new(), times_seen: 0, online,
+        }
+    }
+
+    #[test]
+    fn snapshots_accumulate_and_preserve_geo() {
+        let path = std::env::temp_dir().join(format!("bip110_db_test_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = open(&path).unwrap();
+        let own = OwnNode {
+            addr: "self".into(), version: 0, subversion: "x".into(),
+            implementation: "Bitcoin Core".into(), network: "main".into(),
+        };
+
+        // Snapshot 1: node A, with geolocation.
+        let mut geo = BTreeMap::new();
+        geo.insert("1.1.1.1:8333".to_string(), GeoInfo {
+            lat: 1.0, lon: 2.0, country: "Testland".into(),
+            country_code: "TL".into(), city: "Testville".into(),
+        });
+        write_snapshot(&mut conn, "t1", "main", &own, &None, &[node("1.1.1.1:8333", true)], &[], &geo).unwrap();
+
+        // Snapshot 2: a DIFFERENT node, no geo (simulating a second crawler). A must survive.
+        write_snapshot(&mut conn, "t2", "main", &own, &None, &[node("2.2.2.2:8333", true)], &[], &BTreeMap::new()).unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM nodes WHERE online=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2, "both nodes should accumulate (no wipe)");
+
+        // Snapshot 3: re-write A WITHOUT geo — the geo must be preserved via COALESCE.
+        write_snapshot(&mut conn, "t3", "main", &own, &None, &[node("1.1.1.1:8333", true)], &[], &BTreeMap::new()).unwrap();
+        let city: Option<String> = conn.query_row(
+            "SELECT city FROM nodes WHERE addr='1.1.1.1:8333'", [], |r| r.get(0)).unwrap();
+        assert_eq!(city.as_deref(), Some("Testville"), "geo preserved on geo-less re-write");
+        // last_seen stamped for the online node.
+        let ls: String = conn.query_row(
+            "SELECT last_seen FROM nodes WHERE addr='1.1.1.1:8333'", [], |r| r.get(0)).unwrap();
+        assert_eq!(ls, "t3");
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

@@ -396,6 +396,15 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
                 }
             }
             let signalling = signal_cache_cb.lock().unwrap().clone();
+            // Splice the own node (+ its edges) into the snapshot so the DB the live site
+            // reads actually contains it. The post-crawl splice never fires during a
+            // continuous crawl, so without this your own node is absent from serve mode.
+            // Drop the depth-0 placeholder seed first.
+            nodes.retain(|n| n.addr != "127.0.0.1:0");
+            if let Some(oni) = &own_info {
+                nodes.push(oni.clone());
+                edges.extend(own_edges.iter().cloned());
+            }
             // Geolocate reachable nodes only (for map + DB).
             let geo = if geolocate {
                 let reachable: Vec<NodeInfo> = nodes.iter().filter(|n| n.online).cloned().collect();
@@ -414,7 +423,7 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
             let reachable_total = nodes.len();
             cap_report(&mut nodes, &mut edges, report_max);
             let data = assemble_report(
-                nodes, edges, &own_info, &own_edges, &report_own, &signalling, geo, &network,
+                nodes, edges, &None, &[], &report_own, &signalling, geo, &network,
                 now_iso(), true, refresh, reachable_total,
             );
             match report::write_report(&out, &data) {

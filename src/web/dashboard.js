@@ -24,19 +24,16 @@ const implColor = name => `var(${implSlot(name)})`;
 
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-// The site only shows reachable nodes (unreachable are excluded server-side).
-// A non-IP descriptor for a node: its geolocated place, "Tor" for onion, or the
-// network type for un-geolocated clearnet. Used instead of the raw address in the list.
+// A non-IP descriptor for a table row (from /api/nodes): its geolocated place, "Tor" for
+// onion, or the network type for un-geolocated clearnet. Used instead of the raw address.
 function nodeLocation(n){
-  const self = n.depth === 0 || n.addr.startsWith("self");
-  const g = DATA.geo && DATA.geo[n.addr];
-  if (g){
-    const loc = [g.city, g.country].filter(Boolean).join(", ") || "—";
-    return self ? `${loc} (this node)` : loc;
-  }
+  const addr = String(n.addr || "");
+  const self = n.depth === 0 || addr.startsWith("self");
+  const loc = [n.city, n.country].filter(Boolean).join(", ");
+  if (loc) return self ? `${loc} (this node)` : loc;
   if (self) return "This node";
-  if (n.addr.includes(".onion")) return "Tor (anonymous)";
-  const ipv6 = n.addr.startsWith("[") || (n.addr.split(":").length > 2);
+  if (addr.includes(".onion")) return "Tor (anonymous)";
+  const ipv6 = addr.startsWith("[") || (addr.split(":").length > 2);
   return ipv6 ? "IPv6" : "IPv4";
 }
 
@@ -48,7 +45,10 @@ const shortDate = iso => (iso && iso.length>=10) ? iso.slice(0,10) : (iso||"");
 function renderCards(){
   const a = DATA.aggregates, sig = DATA.signalling;
   const reachable = a.total_nodes;
-  const tor = DATA.nodes.filter(n => n.addr.includes(".onion")).length;
+  // Tor count from the server-side aggregate over ALL reachable nodes (exact), falling
+  // back to the capped node list only if an older payload lacks the field.
+  const tor = (a.onion_nodes != null) ? a.onion_nodes
+            : DATA.nodes.filter(n => n.addr.includes(".onion")).length;
   const live = DATA.live
     ? ` · <span class="live-dot"></span>live, updated ${esc(shortTime(DATA.generated_at))}`
     : "";
@@ -56,6 +56,11 @@ function renderCards(){
     `${esc(DATA.network)} · own node ${esc(DATA.own_node.subversion || "n/a")} · `
     + `${reachable.toLocaleString()} reachable nodes${live}`;
   document.getElementById("gen-time").textContent = DATA.generated_at;
+  // Map cap note: how many of the reachable nodes the (capped) maps are actually drawing.
+  const shown = DATA.nodes.length;
+  const capNote = shown < reachable
+    ? `Currently showing ${shown.toLocaleString()} of ${reachable.toLocaleString()}.` : "";
+  ["graph-shown","geo-shown"].forEach(id => { const e = document.getElementById(id); if (e) e.textContent = capNote; });
   const ready = (a.by_bip110 && a.by_bip110["BIP-110 ready"]) || 0;
   const readyPct = reachable ? (ready / reachable * 100) : 0;
   const cards = [
@@ -562,42 +567,35 @@ const geoMap = (function(){
   return { update:setData };
 })();
 
-// ---- nodes table (module: exposes refresh() while preserving filter/sort state) ----
+// ---- nodes table: server-side search / filter / sort / pagination over the FULL
+// reachable set via /api/nodes (not the size-capped report set), so the table and its
+// counts reflect the whole network. Falls back to nothing when opened from file://.
 const table = (function(){
   const tbody = document.querySelector("#nodes-table tbody");
   const search = document.getElementById("search");
   const fImpl = document.getElementById("filter-impl");
   const fBip = document.getElementById("filter-bip");
-  let sortKey="depth", sortDir=1;
+  const prevBtn = document.getElementById("nodes-prev");
+  const nextBtn = document.getElementById("nodes-next");
+  const pageInfo = document.getElementById("nodes-pageinfo");
+  const PAGE = 100;
+  let sortKey="depth", sortDir="asc", offset=0, total=0, timer=null;
   const pillClass = s => s==="enforcing"?"enf":s==="not_enforcing"?"not":"unk";
   const pillText = s => s==="enforcing"?"Ready":s==="not_enforcing"?"Not ready":"Unknown";
 
   // Add any newly-seen implementations to the filter without clobbering the selection.
   function syncOptions(){
+    if (!DATA.aggregates || !DATA.aggregates.by_implementation) return;
     const have = new Set([...fImpl.options].map(o=>o.value));
     Object.keys(DATA.aggregates.by_implementation).forEach(i=>{
       if (!have.has(i)){ const o=document.createElement("option"); o.value=i; o.textContent=i; fImpl.appendChild(o); }
     });
   }
 
-  function render(){
-    const q=search.value.toLowerCase(), fi=fImpl.value, fb=fBip.value;
-    let rows = DATA.nodes.filter(n=>{
-      if (fi && n.implementation!==fi) return false;
-      if (fb && n.bip110!==fb) return false;
-      // Search over the visible, non-IP attributes (location, client, version, UA).
-      if (q && !(`${nodeLocation(n)} ${n.implementation} ${n.version} ${n.user_agent}`.toLowerCase().includes(q))) return false;
-      return true;
-    });
-    rows.sort((a,b)=>{
-      let x = sortKey==="location" ? nodeLocation(a) : a[sortKey];
-      let y = sortKey==="location" ? nodeLocation(b) : b[sortKey];
-      if (typeof x==="string") return x.localeCompare(y)*sortDir;
-      return (x-y)*sortDir;
-    });
+  function renderRows(rows){
     tbody.innerHTML = rows.map(n=>`
       <tr>
-        <td>${esc(nodeLocation(n))}${n.addr.includes('.onion') ? ' <span class="pill unk">Tor</span>' : ''}</td>
+        <td>${esc(nodeLocation(n))}${String(n.addr).includes('.onion') ? ' <span class="pill unk">Tor</span>' : ''}</td>
         <td><span class="swatch" style="background:${implColor(n.implementation)}"></span>${esc(n.implementation)}</td>
         <td>${esc(n.version||"—")}</td>
         <td>${n.protocol_version||"—"}</td>
@@ -605,13 +603,45 @@ const table = (function(){
         <td><span class="pill ${pillClass(n.bip110)}">${pillText(n.bip110)}</span></td>
       </tr>`).join("");
   }
+  function updatePager(){
+    const from = total ? offset+1 : 0, to = Math.min(offset+PAGE, total);
+    if (pageInfo) pageInfo.textContent = `${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()} nodes`;
+    if (prevBtn) prevBtn.disabled = offset <= 0;
+    if (nextBtn) nextBtn.disabled = offset+PAGE >= total;
+  }
+  async function load(){
+    const params = new URLSearchParams({
+      q: search.value, impl: fImpl.value, bip: fBip.value,
+      sort: sortKey, dir: sortDir, limit: PAGE, offset,
+    });
+    try {
+      const r = await fetch("/api/nodes?" + params.toString(), {cache:"no-store"});
+      if (!r.ok) return;
+      const data = await r.json();
+      total = data.total || 0;
+      renderRows(data.rows || []);
+      updatePager();
+    } catch(e){ /* offline / file:// — leave the table as-is */ }
+  }
+  function reset(){ offset = 0; load(); }               // filter/sort change → back to page 1
+  const debouncedReset = () => { clearTimeout(timer); timer = setTimeout(reset, 250); };
+
   document.querySelectorAll("#nodes-table th").forEach(th=>{
     th.addEventListener("click", ()=>{
-      const k=th.dataset.k; if (sortKey===k) sortDir*=-1; else {sortKey=k; sortDir=1;} render();
+      const k = th.dataset.k;
+      if (sortKey===k) sortDir = sortDir==="asc" ? "desc" : "asc";
+      else { sortKey = k; sortDir = "asc"; }
+      reset();
     });
   });
-  [search,fImpl,fBip].forEach(el=>el.addEventListener("input", render));
-  return { refresh(){ syncOptions(); render(); } };
+  search.addEventListener("input", debouncedReset);
+  [fImpl,fBip].forEach(el=>el.addEventListener("change", reset));
+  if (prevBtn) prevBtn.addEventListener("click", ()=>{ if (offset>0){ offset=Math.max(0,offset-PAGE); load(); } });
+  if (nextBtn) nextBtn.addEventListener("click", ()=>{ if (offset+PAGE<total){ offset+=PAGE; load(); } });
+
+  // On each live refresh, keep the filter options current and re-load the current page so
+  // the totals track the growing crawl (preserves the user's filters/sort/offset).
+  return { refresh(){ syncOptions(); load(); } };
 })();
 
 document.getElementById("disclaimer").textContent =

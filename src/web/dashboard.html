@@ -63,7 +63,10 @@
     <p class="hint">A 3D force-directed map. Each node is a peer we handshook with (or
       heard about); a connector means the source node gossiped the target's address via
       <code>getaddr</code> — reachability, not a confirmed live link. <b>Drag to rotate</b>,
-      <b>scroll to zoom</b>, hover a node for details. Colour = implementation.</p>
+      <b>scroll to zoom</b>, hover a node for details. Colour = implementation.<br>
+      <b>Note:</b> for performance the map draws up to <b>3,000</b> nodes — a subset when the
+      network is larger. The cards and charts above always cover the full network.
+      <span id="graph-shown" class="cap-note"></span></p>
     <div class="graph-wrap panel">
       <canvas id="graph"></canvas>
       <div class="tooltip" id="gtip"></div>
@@ -76,7 +79,9 @@
     <p class="hint">Nodes placed by IP geolocation (via ip-api.com). Colour = implementation;
       each dot is a node's approximate location. <b>Drag to pan, scroll to zoom</b>, hover for
       city and client details. Tor/onion nodes are anonymous (no IP) and can't be mapped —
-      they appear on the network map above but not here.</p>
+      they appear on the network map above but not here.<br>
+      <b>Note:</b> like the network map, this plots up to <b>3,000</b> nodes; totals above are full.
+      <span id="geo-shown" class="cap-note"></span></p>
     <div class="graph-wrap panel">
       <canvas id="geomap"></canvas>
       <div class="tooltip" id="mtip"></div>
@@ -107,6 +112,8 @@
 
   <section>
     <h2>All nodes</h2>
+    <p class="hint">The complete reachable set — searched, filtered and sorted server-side,
+      100 per page. Unlike the maps above, this is <b>not</b> capped.</p>
     <div class="controls">
       <input id="search" type="search" placeholder="Filter by location, client, version…">
       <select id="filter-impl"><option value="">All implementations</option></select>
@@ -129,6 +136,11 @@
         </tr></thead>
         <tbody></tbody>
       </table>
+    </div>
+    <div class="pager">
+      <button id="nodes-prev" class="pager-btn">‹ Prev</button>
+      <span id="nodes-pageinfo" class="pager-info"></span>
+      <button id="nodes-next" class="pager-btn">Next ›</button>
     </div>
   </section>
 

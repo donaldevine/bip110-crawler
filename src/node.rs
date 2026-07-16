@@ -202,6 +202,9 @@ pub struct Aggregates {
     pub handshaked_nodes: usize,
     /// Nodes online in the most recent crawl (relevant when history is enabled).
     pub online_nodes: usize,
+    /// Tor (onion) nodes among the counted set. Aggregated over the full set so the
+    /// figure is exact even when the node list shown in the report is capped for size.
+    pub onion_nodes: usize,
 }
 
 impl Aggregates {
@@ -214,6 +217,9 @@ impl Aggregates {
             }
             if n.online {
                 agg.online_nodes += 1;
+            }
+            if n.addr.contains(".onion") {
+                agg.onion_nodes += 1;
             }
             *agg.by_implementation.entry(n.implementation.clone()).or_default() += 1;
             let vkey = if n.version.is_empty() {

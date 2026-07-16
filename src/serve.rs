@@ -159,11 +159,13 @@ fn handle(conn: &rusqlite::Connection, page: &str, support: &Support, req: tiny_
         "/api/nodes" => {
             let q = query.get("q").map(String::as_str).unwrap_or("");
             let impl_ = query.get("impl").map(String::as_str).unwrap_or("");
-            let reachable = query.get("reachable").map(|s| s == "1").unwrap_or(false);
-            let sort = query.get("sort").map(String::as_str).unwrap_or("last_seen");
+            let bip = query.get("bip").map(String::as_str).unwrap_or("");
+            let sort = query.get("sort").map(String::as_str).unwrap_or("depth");
+            // Default direction is ascending (natural for depth); ?dir=desc flips it.
+            let dir_desc = query.get("dir").map(|s| s == "desc").unwrap_or(false);
             let limit = query.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).min(1000);
             let offset = query.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0);
-            db::read_nodes(conn, q, impl_, reachable, sort, limit, offset)
+            db::read_nodes(conn, q, impl_, bip, sort, dir_desc, limit, offset)
                 .and_then(|(rows, total)| {
                     Ok(serde_json::to_string(&serde_json::json!({
                         "total": total, "rows": rows

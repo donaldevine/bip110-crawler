@@ -8,6 +8,7 @@
 
 # Local run scripts (personal tunnel / RPC settings)
 crawl.bat
+crawltor.bat
 serve.bat
 
 # Donation details for the /support page — served at runtime, never committed

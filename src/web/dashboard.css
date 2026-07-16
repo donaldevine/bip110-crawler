@@ -98,6 +98,15 @@
   .pill.unk { background:color-mix(in srgb, var(--muted) 14%, transparent); color:var(--muted); }
   .swatch { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:6px; vertical-align:middle; box-shadow:0 0 5px currentColor; }
   .disclaimer { font-size:11.5px; color:var(--muted); margin-top:12px; font-family:var(--mono); }
+  .cap-note { color:var(--ink-2); }
+  /* table pagination */
+  .pager { display:flex; align-items:center; justify-content:center; gap:16px; margin-top:14px; }
+  .pager-btn { background:var(--surface-2); border:1px solid var(--border); color:var(--ink);
+    border-radius:8px; padding:7px 14px; font-size:12px; font-family:var(--mono); cursor:pointer;
+    text-transform:uppercase; letter-spacing:.06em; transition:.15s; }
+  .pager-btn:hover:not(:disabled) { border-color:var(--neon); color:var(--neon); box-shadow:0 0 10px var(--glow); }
+  .pager-btn:disabled { opacity:.4; cursor:default; }
+  .pager-info { font-size:12px; color:var(--ink-2); font-family:var(--mono); font-variant-numeric:tabular-nums; }
   footer { margin-top:40px; color:var(--muted); font-size:11.5px; font-family:var(--mono); }
   /* activation timeline / countdown */
   .cd { text-align:center; padding:6px 0 22px; border-bottom:1px solid var(--grid); margin-bottom:24px; }

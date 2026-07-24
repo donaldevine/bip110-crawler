@@ -152,6 +152,16 @@ struct Args {
     #[arg(long, default_value_t = 3)]
     addr_collect: u64,
 
+    /// Ask every handshaked peer which chain it is on (P2P `getheaders`), and group peers by
+    /// their block hash — the definitive chain-split test. Needs `--rpc-*` (the block locator
+    /// is built from your own chain) and `--db` (to store the result).
+    ///
+    /// Enable this on ONE crawler only. The cluster summary is a single record keyed on the
+    /// whole surveyed population, so two crawlers writing it would overwrite each other and
+    /// the page would flip between their two different samples.
+    #[arg(long)]
+    chain_check: bool,
+
     /// Number of recent blocks to scan for BIP-110 (bit 4) signalling.
     #[arg(long, default_value_t = 2016)]
     signal_window: u32,
@@ -218,6 +228,41 @@ fn main() -> Result<()> {
     }
 }
 
+/// Compare peers' block hashes this far below our tip. Far enough that peers a few blocks
+/// behind still report it, close enough to catch a fork the moment it matters.
+const CHAIN_REF_LAG: i64 = 6;
+/// Newest locator entry, below the reference height so the peer's reply covers it.
+const LOCATOR_START_LAG: i64 = 12;
+
+/// Build a BIP-style block locator from our own chain: ten consecutive hashes then
+/// exponentially spaced ones, walking back from just below the tip.
+///
+/// The spacing is what makes this a fork detector. A peer walks the locator, finds the most
+/// recent hash it recognises, and answers from *that* block forward along its own chain — so
+/// even a peer on a chain that diverged thousands of blocks ago still shares an ancestor with
+/// us and tells us exactly where it went its own way.
+fn build_locator(client: &rpc::RpcClient, tip: i64) -> Vec<([u8; 32], i64)> {
+    let mut heights = Vec::new();
+    let (mut h, mut step, mut n) = (tip - LOCATOR_START_LAG, 1i64, 0);
+    while h > 0 && heights.len() < 24 {
+        heights.push(h);
+        n += 1;
+        if n > 10 {
+            step *= 2;
+        }
+        h -= step;
+    }
+    let mut out = Vec::with_capacity(heights.len());
+    for ht in heights {
+        match client.block_hash_at(ht) {
+            Ok(hash) => out.push((hash, ht)),
+            // A gap just shortens the locator; it stays valid as long as one entry matches.
+            Err(e) => eprintln!("[chain] locator: getblockhash {ht} failed: {e:#}"),
+        }
+    }
+    out
+}
+
 /// Perform one full crawl (RPC interrogation + P2P DFS) and write the report.
 fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> Result<()> {
     let rules = rules.clone();
@@ -277,6 +322,7 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
                 user_agent: subver.clone(),
                 services: 0,
                 start_height: height,
+                chain_hash: String::new(),
                 handshaked: false, // becomes true if the crawler also handshakes it
                 implementation: impl_name,
                 version: ver,
@@ -376,8 +422,27 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
         args.retries,
         tor_desc
     );
+    // Chain check: ask every peer we handshake which chain it is on. Needs RPC (to build the
+    // locator from our own chain); without it the locator is empty and peers aren't asked for
+    // headers at all, leaving the crawl byte-for-byte as it was.
+    let locator_rpc = if args.chain_check { build_rpc(args)? } else { None };
+    let (locator, chain_ref_height) = match (&locator_rpc, signalling.as_ref()) {
+        (Some(client), Some(sig)) if sig.tip_height > LOCATOR_START_LAG => {
+            let loc = build_locator(client, sig.tip_height);
+            eprintln!(
+                "[chain] locator built: {} entries, comparing peer hashes at height {}",
+                loc.len(),
+                sig.tip_height - CHAIN_REF_LAG
+            );
+            (loc, sig.tip_height - CHAIN_REF_LAG)
+        }
+        _ => (Vec::new(), 0),
+    };
+
     let cfg = CrawlConfig {
         net,
+        locator: Arc::new(locator),
+        chain_ref_height,
         max_depth,
         max_nodes,
         threads: args.threads,
@@ -464,6 +529,85 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
                                 signalling_heights = heights;
                             }
                             Err(e) => eprintln!("[snapshot] signalling refresh failed: {e:#}"),
+                        }
+                        // Cluster the crawled peers onto chains by the block hash each
+                        // reported at the reference height. Unlike heights (which drift with
+                        // probe timing) a hash is identity: two peers with different hashes at
+                        // the same height are provably on different chains.
+                        if let (Some(dbpath), true) = (&db_path, chain_ref_height > 0) {
+                            let mut clusters: std::collections::BTreeMap<
+                                String,
+                                (u32, std::collections::BTreeMap<String, u32>),
+                            > = Default::default();
+                            for n in nodes.iter().filter(|n| n.handshaked && !n.chain_hash.is_empty()) {
+                                let e = clusters.entry(n.chain_hash.clone()).or_default();
+                                e.0 += 1;
+                                *e.1.entry(n.implementation.clone()).or_insert(0) += 1;
+                            }
+                            let ours = client
+                                .block_hash_at(chain_ref_height)
+                                .map(|h| p2p::hash_hex(&h))
+                                .unwrap_or_default();
+                            let responded: u32 = clusters.values().map(|(c, _)| *c).sum();
+                            let mut list: Vec<serde_json::Value> = clusters
+                                .iter()
+                                .map(|(hash, (count, by_impl))| {
+                                    serde_json::json!({
+                                        "hash": hash, "nodes": count,
+                                        "ours": !ours.is_empty() && *hash == ours,
+                                        "by_implementation": by_impl,
+                                    })
+                                })
+                                .collect();
+                            list.sort_by_key(|c| {
+                                std::cmp::Reverse(c["nodes"].as_u64().unwrap_or(0))
+                            });
+                            let summary = serde_json::json!({
+                                "ref_height": chain_ref_height,
+                                "our_hash": ours,
+                                "responded": responded,
+                                "clusters": list,
+                            });
+                            if let Ok(c) = db::open(dbpath) {
+                                if let Err(e) = db::write_chain_clusters(&c, &summary) {
+                                    eprintln!("[chain] cluster store failed: {e:#}");
+                                }
+                            }
+                            if responded > 0 && summary["clusters"].as_array().map_or(0, |a| a.len()) > 1 {
+                                eprintln!(
+                                    "[chain] {} distinct chains seen across {responded} responding peers at height {chain_ref_height}",
+                                    summary["clusters"].as_array().unwrap().len()
+                                );
+                            }
+                        }
+                        // Chain-split check, on the same new-block trigger. `getchaintips` is
+                        // one cheap call and is the only authoritative view of what THIS node
+                        // rejects — which is exactly what a mandatory-signalling split looks
+                        // like from the inside. Peers supply corroboration from their tips.
+                        if let Some(dbpath) = &db_path {
+                            match client.chain_tips() {
+                                Ok(tips) => {
+                                    let peers: Vec<&NodeInfo> = nodes.iter().collect();
+                                    let split = node::assess_chain_split(&tips, &peers);
+                                    if split.split {
+                                        eprintln!(
+                                            "[split] CHAIN SPLIT SUSPECTED: active={} longest_fork={} rejected={} ready_median={} other_median={}",
+                                            split.active_height, split.longest_fork,
+                                            split.rejected_branches, split.ready_median_height,
+                                            split.other_median_height
+                                        );
+                                    }
+                                    match db::open(dbpath) {
+                                        Ok(c) => {
+                                            if let Err(e) = db::write_chain_split(&c, &split) {
+                                                eprintln!("[split] store failed: {e:#}");
+                                            }
+                                        }
+                                        Err(e) => eprintln!("[split] db open failed: {e:#}"),
+                                    }
+                                }
+                                Err(e) => eprintln!("[split] getchaintips failed: {e:#}"),
+                            }
                         }
                         // Same new-block trigger feeds the /blocks explorer. Only the
                         // crawler holds an RPC connection, so it stores blocks and the API
@@ -695,6 +839,7 @@ fn own_node_record(own: &report::OwnNode, rules: &[Bip110Rule]) -> NodeInfo {
         user_agent: own.subversion.clone(),
         services: 0,
         start_height: 0,
+        chain_hash: String::new(),
         handshaked: true,
         implementation: own.implementation.clone(),
         version: classify_user_agent(&own.subversion).1,
@@ -808,6 +953,9 @@ fn assemble_report(
         network: network.to_string(),
         own_node: report_own.clone(),
         signalling: signalling.clone(),
+        // The live assessment is written straight to the DB on each new block; this
+        // in-memory report (static/--watch output) carries none.
+        chain_split: None,
         aggregates,
         discovered_total,
         nodes,

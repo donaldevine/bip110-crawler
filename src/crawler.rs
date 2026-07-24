@@ -58,6 +58,11 @@ pub struct CrawlConfig {
     /// SOCKS5 proxy for dialing onion peers (e.g. Tor at 127.0.0.1:9050). None = clearnet only.
     pub tor_proxy: Option<SocketAddr>,
     pub rules: Arc<Vec<Bip110Rule>>,
+    /// Block locator `(hash, height)` for the chain check, newest first. Empty disables it —
+    /// peers are then not asked for headers at all, so the crawl behaves exactly as before.
+    pub locator: Arc<Vec<([u8; 32], i64)>>,
+    /// Height at which peers' block hashes are compared to group them onto chains.
+    pub chain_ref_height: i64,
 }
 
 /// A frontier entry: peer to probe and the depth at which we reached it.
@@ -378,6 +383,8 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
         // retry can plausibly fix (timeouts). An actively refused/reset connection is a
         // deterministic "not a reachable peer", so retrying it just burns a worker on the
         // ~97%-dead address book; those give up after the first attempt.
+        // Locator hashes only; the heights come back in when placing the reply.
+        let locator: Vec<[u8; 32]> = cfg.locator.iter().map(|(h, _)| *h).collect();
         let probe_once = || {
             p2p::probe_peer(
                 &addr,
@@ -386,6 +393,7 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
                 cfg.io_timeout,
                 cfg.addr_collect,
                 cfg.tor_proxy,
+                &locator,
             )
         };
         let mut probe = probe_once();
@@ -402,7 +410,12 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
         let mut new_clearnet = Vec::new();
         let mut new_onion = Vec::new();
         match probe {
-            Ok((ver, discovered)) => {
+            Ok((ver, discovered, headers)) => {
+                // Which chain is this peer on? Its block hash at the reference height, placed
+                // by anchoring the returned run to whichever locator block it extends. Empty
+                // when the check is off, the peer didn't answer, or it hasn't reached that
+                // height yet — all of which are "unknown", never "agrees with us".
+                let chain_hash = p2p::peer_hash_at(&headers, &cfg.locator, cfg.chain_ref_height);
                 let (implementation, version) = node::classify_user_agent(&ver.user_agent);
                 let bip110 = node::assess_bip110(&implementation, &ver.user_agent, &cfg.rules);
                 let info = NodeInfo {
@@ -412,6 +425,7 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
                     user_agent: ver.user_agent.clone(),
                     services: ver.services,
                     start_height: ver.start_height,
+                    chain_hash,
                     handshaked: true,
                     implementation,
                     version,
@@ -469,6 +483,7 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
                     user_agent: String::new(),
                     services: 0,
                     start_height: 0,
+                    chain_hash: String::new(),
                     handshaked: false,
                     implementation: "Unreachable".to_string(),
                     version: String::new(),
@@ -488,7 +503,6 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Context;
     use std::io::ErrorKind;
 
     #[test]

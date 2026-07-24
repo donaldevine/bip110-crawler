@@ -181,6 +181,84 @@ impl NetworkParams {
     }
 }
 
+/// One block header as reported by a peer, reduced to what chain comparison needs.
+#[derive(Debug, Clone)]
+pub struct PeerHeader {
+    /// This header's own block hash (internal byte order).
+    pub hash: [u8; 32],
+    /// Its parent's hash — used to anchor the run to a known height.
+    pub prev: [u8; 32],
+}
+
+/// Bitcoin displays block hashes byte-reversed from their internal order.
+pub fn hash_hex(h: &[u8; 32]) -> String {
+    h.iter().rev().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A block hash is the double-SHA256 of the 80-byte header.
+fn block_hash(header80: &[u8]) -> [u8; 32] {
+    let second = Sha256::digest(Sha256::digest(header80));
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&second);
+    out
+}
+
+/// `getheaders` with a block locator. The peer walks the locator, finds the most recent hash
+/// it recognises, and replies with headers from *that common ancestor forward along its own
+/// chain* — which is exactly what makes this a chain-split detector rather than a height check.
+fn build_getheaders(magic: [u8; 4], locator: &[[u8; 32]]) -> Vec<u8> {
+    const PROTOCOL_VERSION: i32 = 70016;
+    let mut p = Vec::with_capacity(4 + 9 + locator.len() * 32 + 32);
+    p.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    write_varint(&mut p, locator.len() as u64);
+    for h in locator {
+        p.extend_from_slice(h);
+    }
+    p.extend_from_slice(&[0u8; 32]); // stop hash 0 = "send as many as you have"
+    build_message(magic, "getheaders", &p)
+}
+
+/// Parse a `headers` message: varint count, then each 80-byte header followed by a tx-count
+/// varint that is always zero.
+fn parse_headers(payload: &[u8]) -> Vec<PeerHeader> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    let count = match read_varint(payload, &mut pos) {
+        Ok(c) => c.min(2000),
+        Err(_) => return out,
+    };
+    for _ in 0..count {
+        let hdr = match payload.get(pos..pos + 80) {
+            Some(h) => h,
+            None => break,
+        };
+        let mut prev = [0u8; 32];
+        prev.copy_from_slice(&hdr[4..36]);
+        out.push(PeerHeader { hash: block_hash(hdr), prev });
+        pos += 80;
+        if read_varint(payload, &mut pos).is_err() {
+            break; // trailing tx-count
+        }
+    }
+    out
+}
+
+/// The peer's block hash at `target`, or empty when it didn't report that height.
+///
+/// The first header returned extends one of the locator blocks, and we know each locator
+/// entry's height — that anchors the whole run, so heights come for free.
+pub fn peer_hash_at(headers: &[PeerHeader], locator: &[([u8; 32], i64)], target: i64) -> String {
+    let Some(first) = headers.first() else { return String::new() };
+    let Some(&(_, base)) = locator.iter().find(|(h, _)| *h == first.prev) else {
+        return String::new(); // no common ancestor in our locator — can't place these
+    };
+    let idx = target - base - 1; // headers[0] sits at base + 1
+    if idx < 0 {
+        return String::new();
+    }
+    headers.get(idx as usize).map(|h| hash_hex(&h.hash)).unwrap_or_default()
+}
+
 /// Result of a successful handshake.
 #[derive(Debug, Clone)]
 pub struct PeerVersion {
@@ -476,7 +554,8 @@ pub fn probe_peer(
     io_timeout: Duration,
     addr_collect: Duration,
     tor_proxy: Option<SocketAddr>,
-) -> Result<(PeerVersion, Vec<Peer>)> {
+    locator: &[[u8; 32]],
+) -> Result<(PeerVersion, Vec<Peer>, Vec<PeerHeader>)> {
     // Tor circuits are slow to build, so give onion connections a lot more time.
     let (ct, iot, act) = if peer.is_onion() {
         (
@@ -533,10 +612,18 @@ pub fn probe_peer(
     }
     let peer_version = peer_version.ok_or_else(|| anyhow!("peer never sent version"))?;
 
-    // 3. Ask for addresses and collect for a bounded window.
+    // 3. Ask for addresses — and, when a locator is supplied, the peer's own chain — then
+    //    collect both in one bounded window. `getheaders` rides along inside the window we
+    //    already wait in for `addr`, so learning each peer's chain costs no extra round trip.
     stream.write_all(&build_message(net.magic, "getaddr", &[]))?;
+    let want_headers = !locator.is_empty();
+    if want_headers {
+        stream.write_all(&build_getheaders(net.magic, locator))?;
+    }
     let deadline = std::time::Instant::now() + act;
     let mut discovered = Vec::new();
+    let mut headers: Vec<PeerHeader> = Vec::new();
+    let mut got_headers = !want_headers;
     // Shorten the read timeout so we don't block past the collect window.
     stream.set_read_timeout(Some(iot.min(act)))?;
     while std::time::Instant::now() < deadline {
@@ -544,6 +631,10 @@ pub fn probe_peer(
             Ok(msg) => match msg.command.as_str() {
                 "addr" => discovered.extend(parse_addr(&msg.payload, net.default_port)),
                 "addrv2" => discovered.extend(parse_addrv2(&msg.payload, net.default_port)),
+                "headers" => {
+                    headers = parse_headers(&msg.payload);
+                    got_headers = true;
+                }
                 "ping" => {
                     let _ = stream.write_all(&build_message(net.magic, "pong", &msg.payload));
                 }
@@ -551,13 +642,14 @@ pub fn probe_peer(
             },
             Err(_) => break, // timeout or closed — stop collecting
         }
-        // A single big addr message (up to 1000) is usually enough for the graph.
-        if discovered.len() >= 1000 {
+        // A single big addr message (up to 1000) is usually enough for the graph — but don't
+        // leave early while the headers reply is still outstanding, or we'd lose the chain view.
+        if discovered.len() >= 1000 && got_headers {
             break;
         }
     }
 
-    Ok((peer_version, discovered))
+    Ok((peer_version, discovered, headers))
 }
 
 #[cfg(test)]
@@ -590,6 +682,59 @@ mod tests {
         assert_eq!(decoded.len(), 35);
         let host = onion_v3_host(&decoded[..32]).expect("32-byte key");
         assert_eq!(host, addr);
+    }
+
+    /// Build a `headers` payload for a run of headers chained onto `base`.
+    fn headers_payload(base: [u8; 32], n: usize) -> (Vec<u8>, Vec<[u8; 32]>) {
+        let mut payload = Vec::new();
+        write_varint(&mut payload, n as u64);
+        let mut prev = base;
+        let mut hashes = Vec::new();
+        for i in 0..n {
+            let mut hdr = [0u8; 80];
+            hdr[0..4].copy_from_slice(&(0x2000_0000u32).to_le_bytes());
+            hdr[4..36].copy_from_slice(&prev);
+            hdr[36..68].copy_from_slice(&[i as u8 + 1; 32]); // merkle root, just needs to vary
+            payload.extend_from_slice(&hdr);
+            payload.push(0x00); // tx count
+            let h = block_hash(&hdr);
+            hashes.push(h);
+            prev = h;
+        }
+        (payload, hashes)
+    }
+
+    #[test]
+    fn headers_parse_and_anchor_to_the_right_heights() {
+        let base = [0xAAu8; 32];
+        let (payload, hashes) = headers_payload(base, 5);
+        let parsed = parse_headers(&payload);
+        assert_eq!(parsed.len(), 5);
+        assert_eq!(parsed[0].prev, base, "first header must extend the locator block");
+        assert_eq!(parsed[0].hash, hashes[0]);
+        assert_eq!(parsed[1].prev, hashes[0], "headers must chain to each other");
+
+        // Locator says `base` is height 1000, so the returned run covers 1001..=1005.
+        let locator = vec![(base, 1000i64)];
+        assert_eq!(peer_hash_at(&parsed, &locator, 1001), hash_hex(&hashes[0]));
+        assert_eq!(peer_hash_at(&parsed, &locator, 1005), hash_hex(&hashes[4]));
+        // Outside the reported run, or at/below the anchor, we must say "don't know".
+        assert_eq!(peer_hash_at(&parsed, &locator, 1006), "");
+        assert_eq!(peer_hash_at(&parsed, &locator, 1000), "");
+        assert_eq!(peer_hash_at(&parsed, &locator, 999), "");
+        // A peer whose first header extends a block we never offered can't be placed at all.
+        let other = vec![([0xBBu8; 32], 1000i64)];
+        assert_eq!(peer_hash_at(&parsed, &other, 1001), "");
+    }
+
+    #[test]
+    fn hash_hex_is_byte_reversed() {
+        let mut h = [0u8; 32];
+        h[0] = 0x11;
+        h[31] = 0xff;
+        let s = hash_hex(&h);
+        assert!(s.starts_with("ff"), "display order is reversed: {s}");
+        assert!(s.ends_with("11"));
     }
 
     #[test]

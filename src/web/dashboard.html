@@ -34,6 +34,7 @@
       <a class="theme-toggle" href="/code">⟨/⟩ Code walkthrough</a>
       <a class="theme-toggle" href="/stats">📊 Crawl stats</a>
       <a class="theme-toggle" href="/blocks">⛓ Blocks</a>
+      <a class="theme-toggle" href="/chains">🔀 Chains</a>
       <a class="theme-toggle" href="/support">⚡ Support</a>
     </div>
   </header>
@@ -60,6 +61,58 @@
       55% signalling in an earlier period, lock-in — and every date after it — arrives
       sooner.</p>
     <div class="panel" id="timeline-panel"><div class="loading">Loading timeline…</div></div>
+  </section>
+
+  <section id="split-section">
+    <h2>Chain integrity</h2>
+    <p class="hint">Mandatory signalling is the moment a split becomes possible: a node enforcing
+      BIP-110 <b>rejects</b> blocks that don't set bit 4, so if miners don't signal, enforcing and
+      non-enforcing nodes follow different chains. This watches for exactly that — from
+      <code>getchaintips</code> on your own node, corroborated by the tip heights peers report
+      during the crawl. Ordinary orphan races produce short branches that resolve, so they are
+      not counted.<br>
+      <b>Caveat:</b> <code>getchaintips</code> is authoritative only for branches your node
+      <em>accepted and then rejected</em>. Mandatory signalling is checked at the header level,
+      so a chain your node refuses outright may never appear there at all — it would simply stall.
+      For the definitive test, <a href="/chains">the chain view</a> asks every reachable peer
+      which block it has, and compares hashes.</p>
+    <div class="panel">
+      <div class="chainsplit" id="chainsplit">
+        <svg class="tracks" viewBox="0 0 900 220" preserveAspectRatio="xMidYMid meet" role="img"
+             aria-labelledby="tk-title">
+          <title id="tk-title">Track diagram: one chain, or a fork into two</title>
+          <!-- Sleepers are a single thick dashed stroke down the centreline, so the "rungs"
+               follow the curve automatically; the two rails are drawn over it. -->
+          <g class="tk-trunk">
+            <path class="tk-sleeper" d="M0,110 H420"/>
+            <path class="tk-rail" d="M0,103 H420"/>
+            <path class="tk-rail" d="M0,117 H420"/>
+          </g>
+          <g class="tk-straight">
+            <path class="tk-sleeper" d="M420,110 H900"/>
+            <path class="tk-rail" d="M420,103 H900"/>
+            <path class="tk-rail" d="M420,117 H900"/>
+            <path class="tk-pulse" d="M0,110 H900"/>
+          </g>
+          <g class="tk-fork tk-up">
+            <path class="tk-sleeper" d="M420,110 C500,110 512,56 600,56 H900"/>
+            <path class="tk-rail" d="M420,103 C500,103 512,49 600,49 H900"/>
+            <path class="tk-rail" d="M420,117 C500,117 512,63 600,63 H900"/>
+            <path class="tk-pulse" d="M0,110 H420 C500,110 512,56 600,56 H900"/>
+          </g>
+          <g class="tk-fork tk-down">
+            <path class="tk-sleeper" d="M420,110 C500,110 512,164 600,164 H900"/>
+            <path class="tk-rail" d="M420,103 C500,103 512,157 600,157 H900"/>
+            <path class="tk-rail" d="M420,117 C500,117 512,171 600,171 H900"/>
+            <path class="tk-pulse" d="M0,110 H420 C500,110 512,164 600,164 H900"/>
+          </g>
+          <text class="tk-label tk-lab-one"  x="890" y="94"></text>
+          <text class="tk-label tk-lab-up"   x="890" y="40"></text>
+          <text class="tk-label tk-lab-down" x="890" y="200"></text>
+        </svg>
+        <div class="tk-status" id="split-status"><div class="loading">Checking chain integrity…</div></div>
+      </div>
+    </div>
   </section>
 
   <section>

@@ -63,6 +63,19 @@ pub struct BlockStats {
     pub outs: i64,
 }
 
+/// One chain tip reported by `getchaintips`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainTip {
+    pub height: i64,
+    pub hash: String,
+    /// 0 for the active chain; >0 means a branch diverging that many blocks back.
+    pub branchlen: i64,
+    /// `active` | `valid-fork` | `valid-headers` | `headers-only` | `invalid`.
+    /// `invalid` means THIS node rejected the branch — under BIP-110 enforcement that is the
+    /// split signature rather than a mere orphan.
+    pub status: String,
+}
+
 /// One block as shown by the explorer page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockInfo {
@@ -241,6 +254,45 @@ impl RpcClient {
             },
             signalling_heights,
         ))
+    }
+
+    /// Our block hash at `height`, in **internal (wire) byte order** — the RPC returns it in
+    /// display order, which is byte-reversed, and the P2P locator needs the wire form.
+    pub fn block_hash_at(&self, height: i64) -> Result<[u8; 32]> {
+        let v = self.call("getblockhash", json!([height]))?;
+        let s = v.as_str().ok_or_else(|| anyhow!("getblockhash: not a string"))?;
+        if s.len() != 64 {
+            bail!("getblockhash: expected 64 hex chars, got {}", s.len());
+        }
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[31 - i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+                .map_err(|_| anyhow!("getblockhash: bad hex"))?;
+        }
+        Ok(out)
+    }
+
+    /// Every chain tip the node knows about (`getchaintips`).
+    ///
+    /// This is how a consensus split is seen from the inside. A node enforcing BIP-110 that
+    /// rejects a non-signalling branch reports that branch with `status: "invalid"` and a
+    /// `branchlen` that grows as the other side keeps building — exactly the signature of a
+    /// mandatory-signalling split. Ordinary orphan races also show up here, but only as
+    /// 1–2 block branches that resolve, which is why the caller applies a length threshold.
+    pub fn chain_tips(&self) -> Result<Vec<ChainTip>> {
+        let v = self.call("getchaintips", json!([]))?;
+        Ok(v.as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|t| ChainTip {
+                        height: t.get("height").and_then(Value::as_i64).unwrap_or(0),
+                        hash: t.get("hash").and_then(Value::as_str).unwrap_or("").to_string(),
+                        branchlen: t.get("branchlen").and_then(Value::as_i64).unwrap_or(0),
+                        status: t.get("status").and_then(Value::as_str).unwrap_or("").to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     /// Current best-block height (`getblockcount`) — a cheap tip check used to decide

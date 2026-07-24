@@ -236,6 +236,8 @@ fn row_to_node(r: &rusqlite::Row) -> rusqlite::Result<(NodeInfo, Option<GeoInfo>
         user_agent: r.get("user_agent")?,
         services: r.get::<_, i64>("services")? as u64,
         start_height: r.get("start_height")?,
+        // Not persisted: it is a per-crawl measurement, aggregated at snapshot time.
+        chain_hash: String::new(),
         handshaked: r.get::<_, i64>("handshaked")? != 0,
         implementation: r.get("implementation")?,
         version: r.get("version")?,
@@ -389,6 +391,7 @@ pub fn read_report(conn: &Connection, max: usize, max_age_secs: u64) -> Result<R
         network,
         own_node,
         signalling,
+        chain_split: read_chain_split(conn),
         aggregates: agg,
         discovered_total,
         nodes,
@@ -516,6 +519,35 @@ pub fn read_signalling(conn: &Connection) -> Option<SignalStats> {
     meta_get(conn, "signalling")
         .and_then(|s| serde_json::from_str::<Option<SignalStats>>(&s).ok())
         .flatten()
+}
+
+/// Record the latest chain-split assessment. Written by the crawler (the only process with an
+/// RPC connection) and read back by the report, so `serve` can render it without RPC.
+pub fn write_chain_split(conn: &Connection, split: &crate::node::ChainSplit) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key,value) VALUES ('chain_split', ?1)",
+        params![serde_json::to_string(split)?],
+    )?;
+    Ok(())
+}
+
+/// Record how the crawled peers cluster onto chains (from their `headers` replies).
+pub fn write_chain_clusters(conn: &Connection, v: &serde_json::Value) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key,value) VALUES ('chain_clusters', ?1)",
+        params![serde_json::to_string(v)?],
+    )?;
+    Ok(())
+}
+
+/// The stored peer chain clustering, or None before a crawl has produced one.
+pub fn read_chain_clusters(conn: &Connection) -> Option<serde_json::Value> {
+    meta_get(conn, "chain_clusters").and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// The stored chain-split assessment, or None before the crawler has made one.
+pub fn read_chain_split(conn: &Connection) -> Option<crate::node::ChainSplit> {
+    meta_get(conn, "chain_split").and_then(|s| serde_json::from_str(&s).ok())
 }
 
 /// Payload/fee aggregates over every analysed block in the CURRENT difficulty period.
@@ -791,7 +823,7 @@ mod tests {
         NodeInfo {
             addr: addr.into(), depth: 1, protocol_version: 70016,
             user_agent: "/Satoshi:27.0.0/".into(), services: 0, start_height: 0,
-            handshaked: online, implementation: "Bitcoin Core".into(),
+            chain_hash: String::new(), handshaked: online, implementation: "Bitcoin Core".into(),
             version: "27.0.0".into(), bip110: Bip110Stance::NotEnforcing,
             first_seen: String::new(), last_seen: String::new(), times_seen: 0, online,
         }
@@ -801,7 +833,7 @@ mod tests {
     fn unreachable(addr: &str) -> NodeInfo {
         NodeInfo {
             addr: addr.into(), depth: 9, protocol_version: 0, user_agent: String::new(),
-            services: 0, start_height: 0, handshaked: false,
+            services: 0, start_height: 0, chain_hash: String::new(), handshaked: false,
             implementation: "Unreachable".into(), version: String::new(),
             bip110: Bip110Stance::Unknown, first_seen: String::new(),
             last_seen: String::new(), times_seen: 0, online: false,

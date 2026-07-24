@@ -663,12 +663,62 @@ document.getElementById("disclaimer").innerHTML =
   + "the node's advertised user agent (builds carrying a BIP-110/UASF-BIP110 tag); the "
   + "authoritative activation signal is the miner block-version signalling shown above.";
 
+// ---- chain-split watch (track diagram) ----
+// Drives the fork purely off the crawler's assessment; the page never re-derives the verdict,
+// so the thresholds live in one place (node.rs) and are unit-tested there.
+function renderChainSplit(){
+  const wrap = document.getElementById("chainsplit");
+  const status = document.getElementById("split-status");
+  if (!wrap || !status) return;
+  const setLabel = (sel, text) => { const t = wrap.querySelector(sel); if (t) t.textContent = text; };
+  const cs = DATA.chain_split;
+
+  if (!cs){
+    wrap.classList.remove("is-split");
+    setLabel(".tk-lab-one", "");
+    status.innerHTML = '<span class="dim">Chain-split watch begins once the crawler has queried '
+      + 'the node — it needs RPC (<code>getchaintips</code>) to see what your node rejects.</span>';
+    return;
+  }
+
+  const n = v => Number(v || 0).toLocaleString();
+  wrap.classList.toggle("is-split", !!cs.split);
+
+  if (!cs.split){
+    setLabel(".tk-lab-one", "one chain · height " + n(cs.active_height));
+    const forkNote = cs.longest_fork > 0
+      ? ` Longest known side branch is ${n(cs.longest_fork)} block(s) — normal orphan churn.`
+      : "";
+    status.innerHTML = `<span class="ok">No split detected.</span> Your node reports a single active `
+      + `chain at height <b>${n(cs.active_height)}</b>, with no rejected branches.${forkNote}`;
+    return;
+  }
+
+  // Split: name each track by what it represents, with the evidence spelled out.
+  setLabel(".tk-lab-up",   "BIP-110 enforcing · " + (cs.ready_median_height ? "height " + n(cs.ready_median_height) : "your node"));
+  setLabel(".tk-lab-down", "not enforcing · " + (cs.other_median_height ? "height " + n(cs.other_median_height) : "rest of network"));
+  const ev = [];
+  if (cs.rejected_branches > 0)
+    ev.push(`your node has <b>rejected ${n(cs.rejected_branches)} branch(es)</b> as invalid`);
+  if (cs.longest_fork > 0)
+    ev.push(`the longest competing branch is <b>${n(cs.longest_fork)} blocks</b>`);
+  if (cs.ready_peers >= 20 && cs.other_peers >= 20){
+    const gap = Math.abs(cs.ready_median_height - cs.other_median_height);
+    if (gap > 0) ev.push(`BIP-110-ready peers sit <b>${n(gap)} blocks</b> from the rest `
+      + `(${n(cs.ready_peers)} vs ${n(cs.other_peers)} nodes)`);
+  }
+  status.innerHTML = `<span class="bad">⚠ Chain split suspected.</span> `
+    + (ev.length ? ev.join("; ") + "." : "")
+    + ` Your node's active chain is at height <b>${n(cs.active_height)}</b>.`;
+}
+
 // ---- assemble everything, then live-poll data.json when running under --watch ----
 function renderAll(){
   renderCards();
   renderSignalling();
   renderTimeline();
   renderCharts();
+  renderChainSplit();
   graph.update(DATA);
   geoMap.update(DATA);
   table.refresh();

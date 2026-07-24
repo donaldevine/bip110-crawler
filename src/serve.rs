@@ -141,6 +141,15 @@ fn handle(
         return;
     }
 
+    // Chain view: which chain each crawled peer is on.
+    if path == "/chains" || path == "/chains.html" {
+        let _ = req.respond(
+            tiny_http::Response::from_string(report::render_chains_html())
+                .with_header(html_header()),
+        );
+        return;
+    }
+
     // Block explorer.
     if path == "/blocks" || path == "/blocks.html" {
         let _ = req.respond(
@@ -209,6 +218,16 @@ fn handle(
                         },
                     }))?)
                 })
+                .map(|s| (s, json_header()))
+        }
+        // Peer chain clustering + the split assessment, for /chains.
+        "/api/chains" => {
+            let body = serde_json::json!({
+                "clusters": db::read_chain_clusters(conn),
+                "split": db::read_chain_split(conn),
+            });
+            serde_json::to_string(&body)
+                .map_err(anyhow::Error::from)
                 .map(|s| (s, json_header()))
         }
         "/api/stats" => db::read_stats(conn, max_age_secs)

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chain view · BIP-110</title>
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="BIP-110 chain view">
+<meta name="twitter:description" content="Which chain every reachable Bitcoin node is actually on, measured peer by peer.">
+<meta name="twitter:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="BIP-110 chain view">
+<meta property="og:description" content="Which chain every reachable Bitcoin node is actually on, measured peer by peer.">
+<meta property="og:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:url" content="https://bip110.xyz/chains">
+<style>
+/*__CSS__*/
+</style>
+</head>
+<body>
+<div class="wrap narrow">
+  <nav>
+    <span class="brand">▚ BIP-110</span>
+    <span class="links">
+      <a href="/">◂ Live crawler</a>
+      <a href="/why">Why BIP-110?</a>
+      <a href="/code">Code</a>
+      <a href="/blocks">⛓ Blocks</a>
+      <a href="/stats">📊 Stats</a>
+      <a href="/support">⚡ Support</a>
+    </span>
+  </nav>
+
+  <div class="hero">
+    <span class="tag">Chain view</span>
+    <h1>Is the chain <span class="accent">split</span>?</h1>
+    <p class="lead">Mandatory signalling is the moment a split becomes possible: a node enforcing
+      BIP-110 rejects blocks that don't set bit 4, so if miners don't signal, enforcing and
+      non-enforcing nodes follow different chains. This page answers the question directly — by
+      asking every reachable node which chain it is on.</p>
+  </div>
+
+  <div class="grid cards" id="cards"><div class="loading">Loading chain view…</div></div>
+
+  <section>
+    <h2>One chain, or two?</h2>
+    <p class="hint">Each track is a distinct chain the network is following. A single track means
+      every node that answered agrees on the same block. Two tracks means they don't — and that
+      is a chain split, not an inference.</p>
+    <div class="panel">
+      <div class="chainsplit" id="chainsplit">
+        <svg class="tracks" viewBox="0 0 900 220" preserveAspectRatio="xMidYMid meet" role="img"
+             aria-labelledby="tk-title">
+          <title id="tk-title">Track diagram: one chain, or a fork into two</title>
+          <g class="tk-trunk">
+            <path class="tk-sleeper" d="M0,110 H420"/>
+            <path class="tk-rail" d="M0,103 H420"/>
+            <path class="tk-rail" d="M0,117 H420"/>
+          </g>
+          <g class="tk-straight">
+            <path class="tk-sleeper" d="M420,110 H900"/>
+            <path class="tk-rail" d="M420,103 H900"/>
+            <path class="tk-rail" d="M420,117 H900"/>
+            <path class="tk-pulse" d="M0,110 H900"/>
+          </g>
+          <g class="tk-fork tk-up">
+            <path class="tk-sleeper" d="M420,110 C500,110 512,56 600,56 H900"/>
+            <path class="tk-rail" d="M420,103 C500,103 512,49 600,49 H900"/>
+            <path class="tk-rail" d="M420,117 C500,117 512,63 600,63 H900"/>
+            <path class="tk-pulse" d="M0,110 H420 C500,110 512,56 600,56 H900"/>
+          </g>
+          <g class="tk-fork tk-down">
+            <path class="tk-sleeper" d="M420,110 C500,110 512,164 600,164 H900"/>
+            <path class="tk-rail" d="M420,103 C500,103 512,157 600,157 H900"/>
+            <path class="tk-rail" d="M420,117 C500,117 512,171 600,171 H900"/>
+            <path class="tk-pulse" d="M0,110 H420 C500,110 512,164 600,164 H900"/>
+          </g>
+          <text class="tk-label tk-lab-one"  x="890" y="94"></text>
+          <text class="tk-label tk-lab-up"   x="890" y="40"></text>
+          <text class="tk-label tk-lab-down" x="890" y="200"></text>
+        </svg>
+        <div class="tk-status" id="split-status"><div class="loading">Checking…</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Chains the network is following</h2>
+    <p class="hint">Every reachable peer is asked, over the P2P protocol, for its block headers
+      from a point we both know. Hashing the reply gives that peer's block hash at a fixed
+      reference height — and a block hash is <b>identity</b>, not an estimate. Peers reporting
+      different hashes at the same height are provably on different chains. Peers still syncing,
+      or that didn't answer in time, are simply absent rather than assumed to agree.</p>
+    <div class="panel" style="overflow-x:auto;">
+      <table id="chains-table">
+        <thead><tr>
+          <th>Chain (block hash at reference height)</th>
+          <th>Nodes</th>
+          <th>Share</th>
+          <th>Client mix</th>
+        </tr></thead>
+        <tbody><tr><td colspan="4"><div class="loading">Loading chains…</div></td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Your node's own view</h2>
+    <p class="hint">What <code>getchaintips</code> reports locally. This is authoritative for
+      what your node <b>accepted and then rejected</b> — a branch marked invalid is a rule
+      disagreement, not an orphan race. It is <em>not</em> a complete view: mandatory signalling
+      is checked at the header level, so a chain your node refuses outright may never appear
+      here at all. That is exactly why the peer survey above exists.</p>
+    <div class="panel" id="tips-panel"><div class="loading">Loading node view…</div></div>
+  </section>
+
+  <p class="disclaimer" id="disclaimer"></p>
+  <footer>bip110.xyz · a live BIP-110 node crawler · <span id="gen"></span></footer>
+</div>
+
+<script>
+/*__JS__*/
+</script>
+</body>
+</html>

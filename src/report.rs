@@ -29,6 +29,9 @@ pub struct ReportData {
     pub network: String,
     pub own_node: OwnNode,
     pub signalling: Option<SignalStats>,
+    /// Chain-split assessment (absent until the crawler has run one against its node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_split: Option<crate::node::ChainSplit>,
     pub aggregates: Aggregates,
     /// Total nodes discovered this run (may exceed `nodes.len()` when the report is
     /// capped for size — see `--report-max-nodes`).
@@ -84,6 +87,8 @@ const SUPPORT_HTML: &str = include_str!("web/support.html");
 const SUPPORT_JS: &str = include_str!("web/support.js");
 const STATS_HTML: &str = include_str!("web/stats.html");
 const STATS_JS: &str = include_str!("web/stats.js");
+const CHAINS_HTML: &str = include_str!("web/chains.html");
+const CHAINS_JS: &str = include_str!("web/chains.js");
 const BLOCKS_HTML: &str = include_str!("web/blocks.html");
 const BLOCKS_JS: &str = include_str!("web/blocks.js");
 
@@ -131,6 +136,12 @@ pub fn render_code_html() -> String {
 /// history, all fetched live from `/api/stats`.
 pub fn render_stats_html() -> String {
     assemble(STATS_HTML, STATS_JS)
+}
+
+/// Chain view (served at `/chains`): which chain each crawled peer is actually on, from the
+/// per-peer `headers` survey, plus the local `getchaintips` view. Fed by `/api/chains`.
+pub fn render_chains_html() -> String {
+    assemble(CHAINS_HTML, CHAINS_JS)
 }
 
 /// The block explorer (served at `/blocks`): recent blocks from `/api/blocks`, flagged by

@@ -97,11 +97,22 @@ const BLOCKS_JS: &str = include_str!("web/blocks.js");
 /// what else they load — including `/code`, which has no page JS of its own.
 const TICKER_JS: &str = include_str!("web/ticker.js");
 
+/// The site icon (see `web/favicon.svg`), served at `/favicon.svg` and `/favicon.ico`.
+pub const FAVICON_SVG: &str = include_str!("web/favicon.svg");
+
 /// Assemble a page from its HTML shell: the shared stylesheet at the `<style>` marker, then the
 /// shared ticker followed by the page's own JS at the `<script>` marker.
+///
+/// The icon link is injected here rather than written into each shell, so every page — present
+/// and future — gets it from one place. Without it browsers request `/favicon.ico` implicitly
+/// and log a 404 on every page load.
 fn assemble(html: &str, js: &str) -> String {
     html.replace("/*__CSS__*/", SITE_CSS)
         .replace("/*__JS__*/", &format!("{TICKER_JS}\n{js}"))
+        .replace(
+            "</head>",
+            "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\">\n</head>",
+        )
 }
 
 /// Inline a JSON payload into the report template. Accepts either compact or

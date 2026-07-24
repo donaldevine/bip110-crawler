@@ -110,6 +110,23 @@ fn handle(
         None => (url.as_str(), HashMap::new()),
     };
 
+    // Site icon. `/favicon.ico` is handled too because browsers request that path implicitly
+    // whenever a page doesn't declare an icon — and a bookmark or an older client still may.
+    // Serving the same SVG for both keeps it to one asset.
+    if path == "/favicon.svg" || path == "/favicon.ico" {
+        let hdr =
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"image/svg+xml"[..]).unwrap();
+        let cache =
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=86400"[..])
+                .unwrap();
+        let _ = req.respond(
+            tiny_http::Response::from_string(report::FAVICON_SVG)
+                .with_header(hdr)
+                .with_header(cache),
+        );
+        return;
+    }
+
     // Binary asset: the social-preview image (served straight from the embedded bytes).
     if path == "/summary_large_image.png" {
         let hdr = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap();

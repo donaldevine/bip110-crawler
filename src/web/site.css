@@ -190,8 +190,11 @@ section .hint { color:var(--muted); font-size:12.5px; margin:0 0 16px; }
   animation:pulse 1.6s ease-in-out infinite; }
 /* Clips the marquee so it can never slide over the pinned block. */
 .tk-scroll { flex:1; min-width:0; overflow:hidden; height:100%; display:flex; align-items:center; }
-.tk-run { display:inline-flex; white-space:nowrap; will-change:transform;
-  animation:tk-scroll 70s linear infinite; }
+/* flex:none is essential. As a flex item .tk-run would otherwise be shrunk to the container's
+   width, and the keyframe below translates by -50% *of the element* — so it would creep by half
+   a viewport instead of exactly one copy of the content, and barely appear to move at all. */
+.tk-run { flex:none; display:inline-flex; white-space:nowrap; will-change:transform;
+  animation:tk-scroll 45s linear infinite; }
 .tk-scroll:hover .tk-run { animation-play-state:paused; }  /* let people actually read it */
 @keyframes tk-scroll { from { transform:translateX(0); } to { transform:translateX(-50%); } }
 .tk-item { flex:none; font-family:var(--mono); font-size:12px; color:var(--ink-2);
@@ -203,9 +206,21 @@ section .hint { color:var(--muted); font-size:12.5px; margin:0 0 16px; }
 .tk-new { background:color-mix(in srgb, var(--good) 12%, transparent); }
 /* Reserve the ticker's height so it never covers page content. */
 body { padding-top:32px; }
+/* Loading / error states for the pinned dot. The dot only turns green once data has actually
+   arrived — claiming "running" before we've heard from the crawler would be a lie. */
+.ticker.tk-loading .tk-live { background:var(--warn); box-shadow:0 0 8px var(--warn); }
+.ticker.tk-error   .tk-live { background:var(--c6); box-shadow:0 0 8px var(--c6);
+  animation:none; }
+.tk-wait { color:var(--warn); }
+
+/* Reduced motion: do NOT simply freeze the marquee — that leaves most items permanently
+   clipped out of view, which is worse than the motion. Stop the animation and let the strip
+   be scrolled by hand instead, so all the content stays reachable. */
 @media (prefers-reduced-motion: reduce) {
   .tk-run { animation:none; }
   .tk-live { animation:none; }
+  .tk-scroll { overflow-x:auto; scrollbar-width:none; }
+  .tk-scroll::-webkit-scrollbar { display:none; }
 }
 
 /* ---- chain-split track diagram. One track running straight = one chain; the fork lights up

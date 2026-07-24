@@ -216,6 +216,10 @@ const graph = (function(){
       .filter(e => idx.has(e.from) && idx.has(e.to))
       .map(e => ({s:idx.get(e.from), t:idx.get(e.to)}));
     alpha = Math.max(alpha, 0.5); // reheat the sim so the layout settles around changes
+    // Rebuild the projection immediately. `proj` is otherwise only refreshed inside draw(),
+    // so between new data landing and the next animation frame it would be shorter than
+    // `nodes` — and pick() indexes it by node position, hitting undefined on a mousemove.
+    proj = nodes.map(project);
   }
 
   // Canvas needs resolved colours (CSS var() can't be used as a fillStyle). Cache
@@ -320,7 +324,9 @@ const graph = (function(){
     ctx.strokeStyle = CV.link;
     for (const l of links){
       const a=proj[l.s], b=proj[l.t];
-      if (a.scale<=0 || b.scale<=0) continue;
+      // Same hazard as pick(): a link can outlive the projection it indexes into, so never
+      // assume both endpoints resolved.
+      if (!a || !b || a.scale<=0 || b.scale<=0) continue;
       const near = (a.depth+b.depth)/2;
       ctx.globalAlpha = Math.max(0.22, Math.min(0.75, 0.6 - near/2600));
       ctx.lineWidth = Math.max(0.8, (a.scale+b.scale)/2 * 0.85);
@@ -367,7 +373,9 @@ const graph = (function(){
   function pick(px,py){
     let best=null,bd=1e9;
     for (let i=0;i<nodes.length;i++){
-      const p=proj[i]; if (p.scale<=0) continue;
+      // Belt-and-braces: `proj` is rebuilt on setData and each draw, but draw() can be skipped
+      // entirely when the canvas has no size (a hidden section), so never assume it's in step.
+      const p=proj[i]; if (!p || p.scale<=0) continue;
       const rad=Math.max(1.6, nodes[i].r*p.scale)+4;
       const d=(p.sx-px)**2+(p.sy-py)**2;
       if (d<bd && d<rad*rad){ bd=d; best=nodes[i]; }

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="BIP-110">
+  <!-- The site's brand mark: ▚ (U+259A, upper-left + lower-right quadrants) in neon on the
+       page's dark surface. Drawn as rects rather than as a text glyph — favicon renderers
+       can't be relied on for font availability or metrics. -->
+  <rect width="32" height="32" rx="6" fill="#0c0e1e"/>
+  <rect x="5.5" y="5.5" width="10.5" height="10.5" fill="#00e5ff"/>
+  <rect x="16" y="16" width="10.5" height="10.5" fill="#00e5ff"/>
+</svg>

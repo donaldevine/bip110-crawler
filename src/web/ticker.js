@@ -11,14 +11,19 @@
   // Every identifier is prefixed/scoped to avoid colliding with a page's own globals.
   const TICK_POLL_MS = 8000;
   const el = document.createElement("div");
-  el.className = "ticker";
+  // Starts in the loading state: amber dot, "connecting…", and a placeholder in the marquee so
+  // the strip is never blank while the first fetch is in flight. Note it deliberately does NOT
+  // use the shared `.loading` class — the host pages call doneLoading(), which removes every
+  // `.loading` element on the page, and that would strip the ticker's placeholder too.
+  el.className = "ticker tk-loading";
   // Two zones: a PINNED status block on the left that never moves (so the "it's alive" signal
   // is always on screen), and a clipped marquee to its right carrying everything else.
   el.innerHTML =
       '<div class="tk-inner">'
     +   '<span class="tk-fixed"><span class="tk-live"></span>'
-    +     '<span id="tk-status" class="tk-dim">connecting…</span></span>'
-    +   '<span class="tk-scroll"><span class="tk-run" id="tk-run"></span></span>'
+    +     '<span id="tk-status" class="tk-wait">connecting…</span></span>'
+    +   '<span class="tk-scroll"><span class="tk-run" id="tk-run">'
+    +     '<span class="tk-item tk-dim">fetching live network data…</span></span></span>'
     + '</div>';
   document.body.insertBefore(el, document.body.firstChild);
 
@@ -41,6 +46,8 @@
     // must be readable at all times, so it must not scroll away.
     const gen = d.generated_at || "";
     const secs = gen ? Math.max(0, Math.round((Date.now() - Date.parse(gen)) / 1000)) : null;
+    // Data has landed: leave the loading/error state, so the dot turns green.
+    el.className = "ticker";
     const st = document.getElementById("tk-status");
     if (st){
       st.className = "";
@@ -88,6 +95,7 @@
       if (!r.ok) throw 0;
       d = await r.json();
     } catch(e){
+      el.className = "ticker tk-error";
       const st = document.getElementById("tk-status");
       if (st){ st.className = "tk-dim"; st.textContent = "crawler unreachable"; }
       const run = document.getElementById("tk-run");

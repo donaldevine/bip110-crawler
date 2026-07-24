@@ -430,7 +430,10 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
                     implementation,
                     version,
                     bip110,
-                    first_seen: String::new(),
+                    // Stamped at probe time. The DB only writes first_seen once (it keeps
+                    // whatever is already stored), so for a peer we've met before this value
+                    // is discarded and the original is preserved.
+                    first_seen: crate::time::now_iso(),
                     // Stamped at PROBE time (not write time): this is when the peer was
                     // last confirmed reachable, which is what the API ages rows against.
                     last_seen: crate::time::now_iso(),

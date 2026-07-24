@@ -172,6 +172,42 @@ section .hint { color:var(--muted); font-size:12.5px; margin:0 0 16px; }
 /* The last cards in a row would push their popup off-screen; anchor those to the right. */
 .card:nth-child(4n) .card-pop, .card:last-child .card-pop { left:auto; right:0; }
 
+/* ---- live activity ticker (every page). Fixed to the top; the body reserves room for it.
+       It scrolls continuously so the page never looks frozen between polls — the run of items
+       is rendered twice and translated by exactly -50%, which lands on the start of the second
+       copy and loops seamlessly. ---- */
+.ticker { position:fixed; top:0; left:0; right:0; z-index:90; height:32px; overflow:hidden;
+  background:color-mix(in srgb, var(--surface) 88%, #000);
+  border-bottom:1px solid var(--border); box-shadow:0 2px 14px rgba(0,0,0,.5); }
+.tk-inner { display:flex; align-items:center; height:100%; }
+/* Pinned status: never scrolls, so the live signal is always on screen. */
+.tk-fixed { flex:none; display:flex; align-items:center; gap:8px; height:100%;
+  padding:0 14px; font-family:var(--mono); font-size:12px; color:var(--ink-2);
+  border-right:1px solid var(--border);
+  background:color-mix(in srgb, var(--surface) 70%, #000); }
+.tk-live { flex:none; width:8px; height:8px; border-radius:50%;
+  background:var(--good); box-shadow:0 0 8px var(--good);
+  animation:pulse 1.6s ease-in-out infinite; }
+/* Clips the marquee so it can never slide over the pinned block. */
+.tk-scroll { flex:1; min-width:0; overflow:hidden; height:100%; display:flex; align-items:center; }
+.tk-run { display:inline-flex; white-space:nowrap; will-change:transform;
+  animation:tk-scroll 70s linear infinite; }
+.tk-scroll:hover .tk-run { animation-play-state:paused; }  /* let people actually read it */
+@keyframes tk-scroll { from { transform:translateX(0); } to { transform:translateX(-50%); } }
+.tk-item { flex:none; font-family:var(--mono); font-size:12px; color:var(--ink-2);
+  padding:0 22px; border-right:1px solid var(--grid); }
+.tk-item b { color:var(--ink); }
+.tk-ok { color:var(--good) !important; }
+.tk-bad { color:var(--c6) !important; }
+.tk-dim { color:var(--muted); }
+.tk-new { background:color-mix(in srgb, var(--good) 12%, transparent); }
+/* Reserve the ticker's height so it never covers page content. */
+body { padding-top:32px; }
+@media (prefers-reduced-motion: reduce) {
+  .tk-run { animation:none; }
+  .tk-live { animation:none; }
+}
+
 /* ---- chain-split track diagram. One track running straight = one chain; the fork lights up
        only when a split is detected. Sleepers are one thick dashed stroke along the centreline
        so the rungs follow the curves for free; the rails are thin strokes over the top. ---- */

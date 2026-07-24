@@ -220,6 +220,10 @@ fn handle(
                 })
                 .map(|s| (s, json_header()))
         }
+        // Small payload for the live ticker on every page.
+        "/api/ticker" => db::read_ticker(conn, max_age_secs)
+            .and_then(|v| Ok(serde_json::to_string(&v)?))
+            .map(|s| (s, json_header())),
         // Peer chain clustering + the split assessment, for /chains.
         "/api/chains" => {
             let body = serde_json::json!({

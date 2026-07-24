@@ -170,7 +170,12 @@ pub fn write_snapshot(
                user_agent=excluded.user_agent, services=excluded.services,
                start_height=excluded.start_height, handshaked=excluded.handshaked,
                implementation=excluded.implementation, version=excluded.version,
-               bip110=excluded.bip110, first_seen=excluded.first_seen,
+               bip110=excluded.bip110,
+               -- first_seen is written ONCE: it means when we first met this peer. Overwriting
+               -- it every snapshot (as this used to) made the column permanently useless and
+               -- left no way to identify a newly discovered node.
+               first_seen=CASE WHEN nodes.first_seen IS NULL OR nodes.first_seen=''
+                               THEN excluded.first_seen ELSE nodes.first_seen END,
                last_seen=excluded.last_seen, times_seen=excluded.times_seen,
                online=excluded.online,
                lat=COALESCE(excluded.lat, lat), lon=COALESCE(excluded.lon, lon),
@@ -529,6 +534,67 @@ pub fn write_chain_split(conn: &Connection, split: &crate::node::ChainSplit) -> 
         params![serde_json::to_string(split)?],
     )?;
     Ok(())
+}
+
+/// Small, cheap payload for the live activity ticker shown on every page.
+///
+/// Deliberately its own endpoint rather than reusing `/api/report`: the ticker runs on all
+/// pages and polls often, so it must stay tiny and must not depend on whatever else a given
+/// page happens to fetch. Every figure here is a count or a single row — no node lists.
+pub fn read_ticker(conn: &Connection, max_age_secs: u64) -> Result<serde_json::Value> {
+    let fresh = fresh_clause(max_age_secs);
+    let one = |sql: String| -> i64 {
+        conn.query_row(&sql, [], |r| r.get(0)).unwrap_or(0)
+    };
+    let reachable = one(format!("SELECT COUNT(*) FROM nodes WHERE {fresh}"));
+    let onion = one(format!(
+        "SELECT COUNT(*) FROM nodes WHERE {fresh} AND addr LIKE '%.onion%'"
+    ));
+    // Newly discovered peers: first_seen is written once, so this really is "never seen before
+    // this window", not "re-confirmed recently".
+    let hour_ago = crate::time::iso_secs_ago(3600);
+    let day_ago = crate::time::iso_secs_ago(86_400);
+    let new_1h: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM nodes WHERE first_seen <> '' AND first_seen >= ?1",
+            params![hour_ago],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let new_24h: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM nodes WHERE first_seen <> '' AND first_seen >= ?1",
+            params![day_ago],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    // Newest recorded block, for the "block found" item.
+    let tip = conn
+        .query_row(
+            "SELECT height, time, signals, miner, tx_count FROM blocks ORDER BY height DESC LIMIT 1",
+            [],
+            |r| {
+                Ok(serde_json::json!({
+                    "height": r.get::<_, i64>(0)?,
+                    "time": r.get::<_, i64>(1)?,
+                    "signals": r.get::<_, i64>(2)? != 0,
+                    "miner": r.get::<_, String>(3)?,
+                    "tx_count": r.get::<_, i64>(4)?,
+                }))
+            },
+        )
+        .ok();
+
+    Ok(serde_json::json!({
+        "generated_at": meta_get(conn, "generated_at").unwrap_or_default(),
+        "reachable": reachable,
+        "onion": onion,
+        "new_1h": new_1h,
+        "new_24h": new_24h,
+        "tip": tip,
+        "signalling": read_signalling(conn),
+    }))
 }
 
 /// Record how the crawled peers cluster onto chains (from their `headers` replies).
@@ -899,6 +965,45 @@ mod tests {
         let (rows, total) = read_nodes(&conn, "", "", "", "depth", false, 100, 0, 48 * 3600).unwrap();
         assert_eq!(total, 1, "read_nodes should apply the same window");
         assert_eq!(rows[0].addr, "5.5.5.5:8333");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn first_seen_is_written_once_and_never_overwritten() {
+        let path = std::env::temp_dir()
+            .join(format!("bip110_db_firstseen_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = open(&path).unwrap();
+        let own = own_stub();
+        let addr = "7.7.7.7:8333";
+
+        let mut n1 = node(addr, true);
+        n1.first_seen = "2026-01-01T00:00:00Z".into();
+        write_snapshot(&mut conn, "t1", "main", &own, &None, &[n1], &[], &BTreeMap::new()).unwrap();
+
+        // A later crawl re-probes the same peer and stamps a NEW first_seen. The original must
+        // survive, or "newly discovered" becomes meaningless (every node looks new every pass).
+        let mut n2 = node(addr, true);
+        n2.first_seen = "2026-07-24T12:00:00Z".into();
+        write_snapshot(&mut conn, "t2", "main", &own, &None, &[n2], &[], &BTreeMap::new()).unwrap();
+
+        let fs: String = conn
+            .query_row("SELECT first_seen FROM nodes WHERE addr=?1", params![addr], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fs, "2026-01-01T00:00:00Z", "first_seen must not be overwritten");
+
+        // But a row that never had one should accept the first stamp it's given.
+        let mut n3 = node("8.8.4.4:8333", true);
+        n3.first_seen = String::new();
+        write_snapshot(&mut conn, "t3", "main", &own, &None, &[n3], &[], &BTreeMap::new()).unwrap();
+        let mut n4 = node("8.8.4.4:8333", true);
+        n4.first_seen = "2026-07-24T13:00:00Z".into();
+        write_snapshot(&mut conn, "t4", "main", &own, &None, &[n4], &[], &BTreeMap::new()).unwrap();
+        let fs2: String = conn
+            .query_row("SELECT first_seen FROM nodes WHERE addr='8.8.4.4:8333'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fs2, "2026-07-24T13:00:00Z", "an empty first_seen should be fillable");
 
         let _ = std::fs::remove_file(&path);
     }

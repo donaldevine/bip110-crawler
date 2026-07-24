@@ -133,6 +133,23 @@ fn handle(
         return;
     }
 
+    // Crawl stats + history graphs.
+    if path == "/stats" || path == "/stats.html" {
+        let _ = req.respond(
+            tiny_http::Response::from_string(report::render_stats_html()).with_header(html_header()),
+        );
+        return;
+    }
+
+    // Block explorer.
+    if path == "/blocks" || path == "/blocks.html" {
+        let _ = req.respond(
+            tiny_http::Response::from_string(report::render_blocks_html())
+                .with_header(html_header()),
+        );
+        return;
+    }
+
     // "Support" page + its QR images (donation details loaded from gitignored files).
     if path == "/support" || path == "/support.html" {
         let _ = req.respond(
@@ -164,6 +181,39 @@ fn handle(
                 .and_then(|r| Ok(serde_json::to_string(&r)?))
                 .map(|s| (s, json_header()))
         }
+        "/api/blocks" => {
+            let limit = query.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50).min(500);
+            // The current retarget period's signalling blocks, with full detail. 2016 is the
+            // Bitcoin difficulty-adjustment period; capped so a fully-signalling period can't
+            // return thousands of rows.
+            const RETARGET_PERIOD: i64 = 2016;
+            db::read_blocks(conn, limit)
+                .and_then(|b| {
+                    let (start, tip, sig) =
+                        db::read_period_signalling_blocks(conn, RETARGET_PERIOD, 200)?;
+                    // Authoritative tally from the crawler's full header scan. It can exceed the
+                    // detailed list above while the per-block backfill is still catching up, so
+                    // the page can show the true "N of M" instead of only the fetched subset.
+                    let stats = db::read_signalling(conn);
+                    // Payload/fee aggregates across the whole period, so the page's cards are
+                    // scoped to the signalling period rather than the loaded block window.
+                    let pstats = db::read_period_block_stats(conn, RETARGET_PERIOD)?;
+                    Ok(serde_json::to_string(&serde_json::json!({
+                        "blocks": b,
+                        "period": {
+                            "start": start, "tip": tip, "length": RETARGET_PERIOD,
+                            "signalling": sig,
+                            "signalled": stats.as_ref().map(|s| s.blocks_signalling),
+                            "scanned": stats.as_ref().map(|s| s.blocks_scanned),
+                            "stats": pstats,
+                        },
+                    }))?)
+                })
+                .map(|s| (s, json_header()))
+        }
+        "/api/stats" => db::read_stats(conn, max_age_secs)
+            .and_then(|v| Ok(serde_json::to_string(&v)?))
+            .map(|s| (s, json_header())),
         "/api/nodes" => {
             let q = query.get("q").map(String::as_str).unwrap_or("");
             let impl_ = query.get("impl").map(String::as_str).unwrap_or("");

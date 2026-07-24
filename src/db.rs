@@ -24,6 +24,22 @@ CREATE TABLE IF NOT EXISTS nodes (
   online INTEGER, lat REAL, lon REAL, country TEXT, country_code TEXT, city TEXT
 );
 CREATE TABLE IF NOT EXISTS edges (from_addr TEXT, to_addr TEXT);
+-- Hourly points of the reachable population, so /stats can graph how the client mix
+-- shifts over time. One row per hour (upserted until the hour rolls over); two crawlers
+-- writing the same hour is idempotent since both compute from this same shared DB.
+CREATE TABLE IF NOT EXISTS history (hour TEXT PRIMARY KEY, snapshot TEXT);
+-- Recent blocks for the /blocks explorer. The crawler (which holds the RPC connection)
+-- fills this whenever a new block arrives; the API server only reads it, so serve mode
+-- still needs nothing but the DB file. Blocks are immutable, so height is the key and
+-- re-fetching the same block is a harmless no-op.
+-- `payload` holds the JSON data-payload breakdown (inscriptions/runes/OP_RETURN), filled
+-- in lazily after the block row exists: scanning a block needs the full verbose block from
+-- RPC, so it's done once per block rather than on every refresh. NULL = not yet analysed.
+CREATE TABLE IF NOT EXISTS blocks (
+  height INTEGER PRIMARY KEY, hash TEXT, time INTEGER, version INTEGER,
+  signals INTEGER, tx_count INTEGER, size INTEGER, weight INTEGER, miner TEXT,
+  payload TEXT, stats TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_nodes_online ON nodes(online);
 CREATE INDEX IF NOT EXISTS idx_nodes_impl ON nodes(implementation);
 CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_addr);
@@ -36,7 +52,76 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
         .ok();
     conn.execute_batch(SCHEMA).context("creating schema")?;
+    // CREATE TABLE IF NOT EXISTS won't add a column to a table that already exists, so
+    // bring older DBs up to date. Erroring means the column is already there.
+    let _ = conn.execute("ALTER TABLE blocks ADD COLUMN payload TEXT", []);
+    let _ = conn.execute("ALTER TABLE blocks ADD COLUMN stats TEXT", []);
     Ok(conn)
+}
+
+/// Window used when recording history points: a node counts toward an hour's population
+/// if it was confirmed reachable within this long of that hour. Matches the serve-side
+/// `--max-age-hours` default so the graph lines up with what the site showed.
+/// Must track the serve-side `--max-age-hours` default, or the graph records a different
+/// population than the site displays. It also has to exceed a full re-crawl cycle: with a
+/// window that expires nodes faster than they can be re-confirmed, every recorded point is
+/// dragged downwards and that artifact is baked into the history permanently.
+const HISTORY_WINDOW_SECS: u64 = 336 * 3600;
+
+/// How many client versions to track individually per hour. The network runs ~100 distinct
+/// versions, almost all of them a long tail; keeping only the biggest N bounds each hourly
+/// row so `/api/stats` stays small over months of history. The tail isn't bucketed — a
+/// lumped "other" line is meaningless on a per-version chart. `total` still carries the
+/// full population, and `distinct_versions` reports how many exist.
+const HISTORY_TOP_VERSIONS: usize = 12;
+
+/// Append/refresh this hour's population point (reachable count per client version).
+/// Cheap: it groups the ~20k reachable rows, not the whole address book.
+fn record_history(tx: &rusqlite::Transaction, now: &str) -> Result<()> {
+    let hour: String = now.chars().take(13).collect(); // YYYY-MM-DDTHH
+    let cutoff = crate::time::iso_secs_ago(HISTORY_WINDOW_SECS);
+
+    let mut counts: Vec<(String, i64)> = Vec::new();
+    {
+        let mut st = tx.prepare(
+            "SELECT implementation, version, COUNT(*) FROM nodes
+             WHERE online=1 AND last_seen >= ?1 GROUP BY implementation, version",
+        )?;
+        let rows = st.query_map(params![cutoff], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (im, ver, c) = row?;
+            // Same key shape as the dashboard's version chart: "Bitcoin Knots 29.3.0".
+            let key = if ver.is_empty() { im } else { format!("{im} {ver}") };
+            counts.push((key, c));
+        }
+    }
+    let total: i64 = counts.iter().map(|(_, c)| *c).sum();
+    let distinct_versions = counts.len() as i64;
+    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    let versions: BTreeMap<String, i64> =
+        counts.into_iter().take(HISTORY_TOP_VERSIONS).collect();
+
+    let onion: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM nodes WHERE online=1 AND last_seen >= ?1 AND addr LIKE '%.onion%'",
+        params![cutoff],
+        |r| r.get(0),
+    )?;
+    let snapshot = serde_json::json!({
+        "total": total, "onion": onion,
+        "distinct_versions": distinct_versions, "versions": versions,
+    })
+    .to_string();
+    tx.execute(
+        "INSERT OR REPLACE INTO history (hour, snapshot) VALUES (?1, ?2)",
+        params![hour, snapshot],
+    )?;
+    Ok(())
 }
 
 fn stance_str(s: &Bip110Stance) -> &'static str {
@@ -131,6 +216,7 @@ pub fn write_snapshot(
     set_meta("own_node", serde_json::to_string(own_node)?)?;
     set_meta("signalling", serde_json::to_string(signalling)?)?;
     set_meta("discovered_total", nodes.len().to_string())?;
+    record_history(&tx, generated_at)?;
     tx.commit()?;
     Ok(())
 }
@@ -328,6 +414,293 @@ pub struct NodeRow {
     pub country: Option<String>,
 }
 
+/// Store blocks for the explorer (upsert by height; blocks are immutable so re-storing
+/// the same height is a no-op). Called by the crawler, which owns the RPC connection.
+pub fn write_blocks(conn: &mut Connection, blocks: &[crate::rpc::BlockInfo]) -> Result<()> {
+    let tx = conn.transaction()?;
+    {
+        // Upsert, NOT INSERT OR REPLACE. Every new block re-fetches the recent window, so
+        // most of these rows already exist and many have been analysed. REPLACE deletes the
+        // old row and re-inserts with no payload/stats, wiping the analysis and leaving the
+        // newest blocks — the ones the page shows — perpetually "scan pending". So update
+        // only the cheap metadata that recent_blocks provides and leave payload/stats intact.
+        let mut ins = tx.prepare(
+            "INSERT INTO blocks
+             (height,hash,time,version,signals,tx_count,size,weight,miner)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(height) DO UPDATE SET
+               hash=excluded.hash, time=excluded.time, version=excluded.version,
+               signals=excluded.signals, tx_count=excluded.tx_count, size=excluded.size,
+               weight=excluded.weight, miner=excluded.miner",
+        )?;
+        for b in blocks {
+            ins.execute(params![
+                b.height, b.hash, b.time, b.version, b.signals as i64,
+                b.tx_count, b.size, b.weight, b.miner
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// The columns every block view selects, in the order `block_row` expects.
+const BLOCK_COLS: &str = "height,hash,time,version,signals,tx_count,size,weight,miner,payload,stats";
+
+/// Map one `BLOCK_COLS` row to the JSON the explorer consumes. Shared by every block query
+/// so they can't drift apart in shape.
+fn block_row(r: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
+    let payload: Option<String> = r.get(9)?;
+    let stats: Option<String> = r.get(10)?;
+    let parse = |s: Option<String>| s.and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    Ok(serde_json::json!({
+        "height": r.get::<_, i64>(0)?,
+        "hash": r.get::<_, String>(1)?,
+        "time": r.get::<_, i64>(2)?,
+        "version": r.get::<_, i64>(3)?,
+        "signals": r.get::<_, i64>(4)? != 0,
+        "tx_count": r.get::<_, i64>(5)?,
+        "size": r.get::<_, i64>(6)?,
+        "weight": r.get::<_, i64>(7)?,
+        "miner": r.get::<_, String>(8)?,
+        "payload": parse(payload),
+        "stats": parse(stats),
+    }))
+}
+
+/// Newest `limit` blocks, newest first, for the explorer page. Each row carries its
+/// data-payload breakdown when one has been computed (`payload` is null until then).
+pub fn read_blocks(conn: &Connection, limit: usize) -> Result<Vec<serde_json::Value>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT {BLOCK_COLS} FROM blocks ORDER BY height DESC LIMIT ?1"
+    ))?;
+    let rows = st.query_map(params![limit as i64], block_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Blocks in the CURRENT difficulty period that signal BIP-110, newest first, with full
+/// detail. The period is retarget-aligned (`[start, tip]`, start divisible by `period_len`)
+/// to match how BIP8 tallies signalling — the same window the crawler's signalling scan uses.
+///
+/// Returns `(period_start, tip, blocks)`. The tip is taken as the highest stored block, which
+/// equals the chain tip because the crawler always stores up to the tip. Note the list only
+/// covers blocks the crawler has actually recorded (the explorer accumulates these as it
+/// runs); it is not a re-scan of every header in the period.
+pub fn read_period_signalling_blocks(
+    conn: &Connection,
+    period_len: i64,
+    limit: usize,
+) -> Result<(i64, i64, Vec<serde_json::Value>)> {
+    let period_len = period_len.max(1);
+    // MAX() always returns one row — NULL (→ None) when the table is empty. No blocks yet:
+    // report an empty current period rather than erroring.
+    let tip: Option<i64> = conn.query_row("SELECT MAX(height) FROM blocks", [], |r| r.get(0))?;
+    let Some(tip) = tip else {
+        return Ok((0, 0, Vec::new()));
+    };
+    let start = (tip / period_len) * period_len;
+    let mut st = conn.prepare(&format!(
+        "SELECT {BLOCK_COLS} FROM blocks
+         WHERE signals=1 AND height>=?1 ORDER BY height DESC LIMIT ?2"
+    ))?;
+    let rows = st.query_map(params![start, limit as i64], block_row)?;
+    let blocks = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok((start, tip, blocks))
+}
+
+/// The authoritative period signalling tally the crawler last recorded from its full header
+/// scan (the same figure the dashboard shows), or None if no scan has run. Lets the explorer
+/// report the true "N of M signalled" even before the per-block backfill has fetched detail
+/// for every signalling block — otherwise the count and the detailed list disagree.
+pub fn read_signalling(conn: &Connection) -> Option<SignalStats> {
+    meta_get(conn, "signalling")
+        .and_then(|s| serde_json::from_str::<Option<SignalStats>>(&s).ok())
+        .flatten()
+}
+
+/// Payload/fee aggregates over every analysed block in the CURRENT difficulty period.
+///
+/// The explorer's headline cards used to be derived from whatever handful of blocks the page
+/// happened to load, which made their denominator "the last 200 blocks" rather than the period
+/// the signalling tally is measured over — two different scopes on one screen. This aggregates
+/// across the period in the DB instead, so every figure shares one denominator.
+///
+/// `analysed` is the number of period blocks whose payload scan has completed; it climbs toward
+/// the full period as the crawler works through it, so the percentages are a growing sample of
+/// the period rather than of an arbitrary recent window.
+///
+/// Summing in Rust rather than via SQL `json_extract` keeps this independent of whether the
+/// bundled SQLite ships the JSON1 extension.
+pub fn read_period_block_stats(conn: &Connection, period_len: i64) -> Result<serde_json::Value> {
+    let period_len = period_len.max(1);
+    let tip: Option<i64> = conn.query_row("SELECT MAX(height) FROM blocks", [], |r| r.get(0))?;
+    let Some(tip) = tip else {
+        return Ok(serde_json::json!({ "analysed": 0, "with_stats": 0 }));
+    };
+    let start = (tip / period_len) * period_len;
+
+    let mut st = conn
+        .prepare("SELECT payload, stats FROM blocks WHERE height >= ?1 AND payload IS NOT NULL")?;
+    let rows = st.query_map(params![start], |r| {
+        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))
+    })?;
+
+    let g = |v: &serde_json::Value, k: &str| v.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let (mut analysed, mut with_stats) = (0i64, 0i64);
+    let (mut insc, mut runes) = (0i64, 0i64);
+    let (mut payload_weight, mut reject_weight, mut total_fee) = (0i64, 0i64, 0i64);
+    let mut rates: Vec<i64> = Vec::new();
+    for row in rows {
+        let (p, s) = row?;
+        let Some(p) = p.and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else {
+            continue;
+        };
+        analysed += 1;
+        insc += g(&p, "insc_count");
+        runes += g(&p, "rune_count");
+        payload_weight += g(&p, "payload_weight");
+        reject_weight += g(&p, "bip110_reject_weight");
+        if let Some(s) = s.and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) {
+            with_stats += 1;
+            total_fee += g(&s, "total_fee");
+            rates.push(g(&s, "median_feerate"));
+        }
+    }
+    rates.sort_unstable();
+    let median_feerate = rates.get(rates.len() / 2).copied().unwrap_or(0);
+    Ok(serde_json::json!({
+        "start": start,
+        "analysed": analysed,
+        "with_stats": with_stats,
+        "insc_count": insc,
+        "rune_count": runes,
+        "payload_weight": payload_weight,
+        "reject_weight": reject_weight,
+        "total_fee": total_fee,
+        "median_feerate": median_feerate,
+    }))
+}
+
+/// Heights of stored blocks that haven't been analysed yet, newest first.
+pub fn blocks_needing_analysis(conn: &Connection, limit: usize) -> Result<Vec<(i64, String)>> {
+    let mut st = conn.prepare(
+        "SELECT height, hash FROM blocks WHERE payload IS NULL ORDER BY height DESC LIMIT ?1",
+    )?;
+    let rows = st.query_map(params![limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Of `heights`, the ones not yet in the blocks table — the signalling blocks the period
+/// scan found that still need their full detail fetched and stored. Preserves input order.
+pub fn unstored_heights(conn: &Connection, heights: &[i64]) -> Result<Vec<i64>> {
+    let mut st = conn.prepare("SELECT 1 FROM blocks WHERE height=?1")?;
+    let mut missing = Vec::new();
+    for &h in heights {
+        if !st.exists(params![h])? {
+            missing.push(h);
+        }
+    }
+    Ok(missing)
+}
+
+/// Attach the computed data-payload breakdown and fee stats to a stored block.
+/// `stats` is optional: `getblockstats` can legitimately fail (e.g. a pruned node), and
+/// the payload scan is still worth keeping when it does.
+pub fn write_block_analysis(
+    conn: &Connection,
+    height: i64,
+    payload: &crate::rpc::BlockPayload,
+    stats: Option<&crate::rpc::BlockStats>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE blocks SET payload=?2, stats=?3 WHERE height=?1",
+        params![
+            height,
+            serde_json::to_string(payload)?,
+            stats.map(serde_json::to_string).transpose()?,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Addresses of nodes we have previously handshaked, most-recently-confirmed first.
+///
+/// Used to seed a re-crawl. Without this, every cycle restarts from the RPC peers and
+/// rediscovers the network from scratch, grinding through a ~97%-dead address book before
+/// it revisits any known-good node — so re-confirmation crawls at a trickle and nodes
+/// expire from the freshness window faster than they can be refreshed. Seeding from the
+/// known-good set puts the live network at the FRONT of the queue, so a cycle refreshes
+/// `last_seen` for real peers within minutes instead of days.
+pub fn read_known_good(conn: &Connection, limit: usize) -> Result<Vec<String>> {
+    let mut st = conn.prepare(
+        "SELECT addr FROM nodes WHERE online=1 AND handshaked=1
+         ORDER BY last_seen DESC LIMIT ?1",
+    )?;
+    let rows = st.query_map(params![limit as i64], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Crawl-health stats + history for the `/stats` page.
+///
+/// Everything here is derived from the same DB the site serves: how much of the gossiped
+/// address book is actually reachable, and the hourly population series (client mix over time).
+pub fn read_stats(conn: &Connection, max_age_secs: u64) -> Result<serde_json::Value> {
+    let fresh = fresh_clause(max_age_secs);
+
+    let total_addresses: i64 = conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
+    let online_raw: i64 =
+        conn.query_row("SELECT COUNT(*) FROM nodes WHERE online=1", [], |r| r.get(0))?;
+    let unreachable: i64 =
+        conn.query_row("SELECT COUNT(*) FROM nodes WHERE online=0", [], |r| r.get(0))?;
+    let reachable: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM nodes WHERE {fresh}"),
+        [],
+        |r| r.get(0),
+    )?;
+    let onion: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM nodes WHERE {fresh} AND addr LIKE '%.onion%'"),
+        [],
+        |r| r.get(0),
+    )?;
+    let edges: i64 = conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
+    let distinct_versions: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(DISTINCT implementation || ' ' || version) FROM nodes WHERE {fresh}"
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+
+    // Hourly population series (client versions over time), newest 30 days, returned
+    // chronologically. Capped so the payload stays small as history accumulates.
+    let mut history = Vec::new();
+    {
+        let mut st =
+            conn.prepare("SELECT hour, snapshot FROM history ORDER BY hour DESC LIMIT 720")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (hour, snap) = row?;
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&snap) {
+                history.push(serde_json::json!({ "hour": hour, "snapshot": v }));
+            }
+        }
+        history.reverse(); // oldest -> newest for the chart
+    }
+
+    Ok(serde_json::json!({
+        "total_addresses": total_addresses,
+        "reachable": reachable,
+        "onion": onion,
+        "unreachable": unreachable,
+        "online_raw": online_raw,
+        "aged_out": online_raw - reachable,
+        "edges": edges,
+        "distinct_versions": distinct_versions,
+        "max_age_hours": max_age_secs / 3600,
+        "history": history,
+    }))
+}
+
 /// Paginated + filtered node list for the table (all reachable nodes, not the capped
 /// report set). Returns (page-of-rows, total-matching). Filtering by `q`/`implementation`
 /// happens in SQL; BIP-110 readiness is derived from the user agent, so the `bip` filter,
@@ -443,6 +816,30 @@ mod tests {
     }
 
     #[test]
+    fn known_good_reseed_prefers_recent_handshaked_peers() {
+        let path = std::env::temp_dir().join(format!("bip110_db_reseed_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = open(&path).unwrap();
+        let own = own_stub();
+
+        let mut older = node("1.1.1.1:8333", true);
+        older.last_seen = "2026-01-01T00:00:00Z".into();
+        let mut newer = node("2.2.2.2:8333", true);
+        newer.last_seen = "2026-06-01T00:00:00Z".into();
+        // Never handshaked -> must not be re-seeded (nothing to re-confirm).
+        let dead = unreachable("3.3.3.3:8333");
+        write_snapshot(&mut conn, "t1", "main", &own, &None, &[older, newer, dead], &[], &BTreeMap::new()).unwrap();
+
+        let got = read_known_good(&conn, 10).unwrap();
+        assert_eq!(got, vec!["2.2.2.2:8333".to_string(), "1.1.1.1:8333".to_string()],
+                   "most-recently-confirmed first, unreachable excluded");
+        // The limit caps the queue.
+        assert_eq!(read_known_good(&conn, 1).unwrap(), vec!["2.2.2.2:8333".to_string()]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn aging_drops_nodes_not_confirmed_recently() {
         let path = std::env::temp_dir().join(format!("bip110_db_age_{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
@@ -506,6 +903,41 @@ mod tests {
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM nodes WHERE addr='8.8.8.8:8333'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn re_storing_a_block_preserves_its_analysis() {
+        use crate::rpc::{BlockInfo, BlockPayload};
+        let path = std::env::temp_dir()
+            .join(format!("bip110_db_blocks_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = open(&path).unwrap();
+
+        let blk = |h: i64| BlockInfo {
+            height: h, hash: format!("{h:064x}"), time: 100, version: 0x2000_0000,
+            signals: false, tx_count: 2000, size: 1_500_000, weight: 3_990_000,
+            miner: "Foundry USA".into(),
+        };
+
+        // Store the block, then analyse it (payload gets filled in).
+        write_blocks(&mut conn, &[blk(900_000)]).unwrap();
+        let mut payload = BlockPayload::default();
+        payload.insc_count = 42;
+        write_block_analysis(&conn, 900_000, &payload, None).unwrap();
+
+        // A later new-block event re-fetches the recent window and re-stores this same
+        // height. That must NOT wipe the analysis — the regression that made almost every
+        // recent block read "scan pending".
+        write_blocks(&mut conn, &[blk(900_000)]).unwrap();
+
+        assert!(
+            blocks_needing_analysis(&conn, 10).unwrap().is_empty(),
+            "re-storing an analysed block must leave its payload intact"
+        );
+        let out = read_blocks(&conn, 10).unwrap();
+        assert_eq!(out[0]["payload"]["insc_count"], 42, "payload must survive the re-store");
 
         let _ = std::fs::remove_file(&path);
     }

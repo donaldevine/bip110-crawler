@@ -68,36 +68,36 @@ pub fn write_report(out_dir: &Path, data: &ReportData) -> Result<()> {
 /// draws country outlines with no external assets. Produced by `examples/slim_world.rs`.
 const WORLD_GEOJSON: &str = include_str!("../assets/world.min.json");
 
-/// Shared cyberpunk theme foundation (design tokens + backdrop + links), injected into
-/// every page's `<style>` at the `/*__THEME__*/` marker so the palette lives in one file.
-const THEME_CSS: &str = include_str!("web/theme.css");
+/// The one stylesheet every page uses (see `web/site.css`): design tokens plus every
+/// shared component, based on the dashboard. Pages opt into variations with modifier
+/// classes rather than shipping their own CSS.
+const SITE_CSS: &str = include_str!("web/site.css");
 
-// Per-page front-end assets (HTML shell + CSS + JS), embedded at build time. The shell
-// carries `/*__THEME__*/`, `/*__CSS__*/`, and `/*__JS__*/` markers that assemble() fills.
+// Per-page front-end assets (HTML shell + JS), embedded at build time. Each shell carries
+// a `/*__CSS__*/` and a `/*__JS__*/` marker that assemble() fills.
 const DASH_HTML: &str = include_str!("web/dashboard.html");
-const DASH_CSS: &str = include_str!("web/dashboard.css");
 const DASH_JS: &str = include_str!("web/dashboard.js");
 const WHY_HTML: &str = include_str!("web/why.html");
-const WHY_CSS: &str = include_str!("web/why.css");
 const WHY_JS: &str = include_str!("web/why.js");
 const CODE_HTML: &str = include_str!("web/code.html");
-const CODE_CSS: &str = include_str!("web/code.css");
 const SUPPORT_HTML: &str = include_str!("web/support.html");
-const SUPPORT_CSS: &str = include_str!("web/support.css");
 const SUPPORT_JS: &str = include_str!("web/support.js");
+const STATS_HTML: &str = include_str!("web/stats.html");
+const STATS_JS: &str = include_str!("web/stats.js");
+const BLOCKS_HTML: &str = include_str!("web/blocks.html");
+const BLOCKS_JS: &str = include_str!("web/blocks.js");
 
-/// Assemble a page from its HTML shell: inject the shared theme + page CSS at the
-/// `<style>` markers and page JS at the `<script>` marker.
-fn assemble(html: &str, css: &str, js: &str) -> String {
-    html.replace("/*__THEME__*/", THEME_CSS)
-        .replace("/*__CSS__*/", css)
+/// Assemble a page from its HTML shell: the shared stylesheet at the `<style>` marker and
+/// the page's JS at the `<script>` marker.
+fn assemble(html: &str, js: &str) -> String {
+    html.replace("/*__CSS__*/", SITE_CSS)
         .replace("/*__JS__*/", js)
 }
 
 /// Inline a JSON payload into the report template. Accepts either compact or
 /// pretty-printed JSON (both are valid JS object literals).
 pub fn render_index_html(json: &str) -> String {
-    assemble(DASH_HTML, DASH_CSS, DASH_JS)
+    assemble(DASH_HTML, DASH_JS)
         .replace("/*__DATA__*/null", json)
         .replace("/*__WORLD__*/null", WORLD_GEOJSON)
 }
@@ -106,7 +106,7 @@ pub fn render_index_html(json: &str) -> String {
 /// (`/api/report`) instead of inlining data, so it loads instantly at any dataset size.
 pub fn render_api_html() -> String {
     const EMPTY: &str = r#"{"generated_at":"","network":"main","own_node":{"addr":"self","version":0,"subversion":"loading…","implementation":"Unknown","network":"main"},"signalling":null,"aggregates":{"by_implementation":{},"by_version":{},"by_bip110":{},"total_nodes":0,"handshaked_nodes":0,"online_nodes":0},"discovered_total":0,"nodes":[],"edges":[],"live":true,"refresh_seconds":10}"#;
-    assemble(DASH_HTML, DASH_CSS, DASH_JS)
+    assemble(DASH_HTML, DASH_JS)
         .replace("/*__DATA__*/null", EMPTY)
         .replace("/*__WORLD__*/null", WORLD_GEOJSON)
         .replace("/*__API_URL__*/null", "\"/api/report\"")
@@ -117,14 +117,26 @@ pub fn render_api_html() -> String {
 /// e.g. when opened from `file://`). Quantitative charts use the real crawl data;
 /// conceptual diagrams are explicitly labelled illustrative.
 pub fn render_why_html() -> String {
-    assemble(WHY_HTML, WHY_CSS, WHY_JS)
+    assemble(WHY_HTML, WHY_JS)
 }
 
 /// The "BIP-110 code walkthrough" page (served at `/code`): the seven consensus rules
 /// and how they're implemented. Static content, adapted from the Bitcoin Knots
 /// walkthrough (attributed on the page).
 pub fn render_code_html() -> String {
-    assemble(CODE_HTML, CODE_CSS, "")
+    assemble(CODE_HTML, "")
+}
+
+/// The "Crawl stats" page (served at `/stats`): crawl-health figures and the population
+/// history, all fetched live from `/api/stats`.
+pub fn render_stats_html() -> String {
+    assemble(STATS_HTML, STATS_JS)
+}
+
+/// The block explorer (served at `/blocks`): recent blocks from `/api/blocks`, flagged by
+/// whether they signal BIP-110.
+pub fn render_blocks_html() -> String {
+    assemble(BLOCKS_HTML, BLOCKS_JS)
 }
 
 /// The "Support this project" page (served at `/support`). Addresses and QR image paths
@@ -159,7 +171,7 @@ pub fn render_support_html(
     if cards.is_empty() {
         cards = "<div class=\"notice\">Support isn't configured on this instance.</div>".to_string();
     }
-    assemble(SUPPORT_HTML, SUPPORT_CSS, SUPPORT_JS)
+    assemble(SUPPORT_HTML, SUPPORT_JS)
         .replace("<!--__CARDS__-->", &cards)
 }
 

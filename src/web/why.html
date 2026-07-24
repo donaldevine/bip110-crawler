@@ -16,17 +16,18 @@
   <meta property="og:url" content="https://bip110.xyz/why">
 
 <style>
-/*__THEME__*/
 /*__CSS__*/
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap narrow">
   <nav>
     <span class="brand">▚ BIP-110</span>
-    <span style="display:flex; gap:10px; flex-wrap:wrap;">
+    <span class="links">
       <a href="/">◂ Live network crawler</a>
       <a href="/code">⟨/⟩ Code walkthrough</a>
+      <a href="/stats">📊 Stats</a>
+      <a href="/blocks">⛓ Blocks</a>
       <a href="/support">⚡ Support</a>
     </span>
   </nav>
@@ -58,39 +59,118 @@
 
   <section>
     <h2>The case for support</h2>
-    <p class="hint">Six reasons node operators, miners, and businesses back BIP-110.</p>
+    <p class="hint">The case node operators, miners and businesses make for BIP-110.</p>
     <div class="grid arg-grid">
-      <div class="arg"><span class="ico">🌐</span><h3>Protect decentralisation</h3>
-        <p>A leaner chain means cheaper disk, bandwidth, and sync time. The lower the cost of running a
-          full node, the more people can — and node count is the backbone of Bitcoin's censorship resistance.</p></div>
-      <div class="arg"><span class="ico">💸</span><h3>Bitcoin is money first</h3>
-        <p>Block space is scarce and paid for by everyone. Reserving it for monetary transactions keeps
-          fees predictable for real payments instead of bidding wars over arbitrary data storage.</p></div>
-      <div class="arg"><span class="ico">🧹</span><h3>Curb spam &amp; bloat</h3>
-        <p>Non-financial payloads inflate block and chain size without adding monetary utility. Tighter
-          data limits slow that growth and keep the UTXO set and archive healthier.</p></div>
-      <div class="arg"><span class="ico">↩️</span><h3>Low-risk &amp; temporary</h3>
-        <p>It's a <em>soft</em> fork (backwards-compatible) and explicitly <em>temporary</em>. It can lapse
-          or be revisited — no contentious hard fork, no forced chain split, no permanent commitment.</p></div>
-      <div class="arg"><span class="ico">📊</span><h3>Activated by the market</h3>
-        <p>Nothing is imposed. Activation requires 55% of a difficulty period's 2016 blocks to signal —
-          a genuine, measurable supermajority of hash power choosing the rule, not a top-down decree.</p></div>
-      <div class="arg"><span class="ico">🗳️</span><h3>You decide</h3>
-        <p>Support is opt-in: run software that enforces the limits and, if you mine, signal for it.
-          This crawler exists so anyone can watch that choice play out across the network in real time.</p></div>
+      <div class="arg"><span class="ico">🌐</span><h3>Verification must stay cheap</h3>
+        <p>Every byte in a block is downloaded, validated and stored by <b>every full node on Earth,
+          permanently</b>. Arbitrary data raises that cost for everyone and returns nothing to Bitcoin's
+          monetary function. The cost of running a node is the ceiling on how many people can verify
+          Bitcoin for themselves — and self-verification is the entire point of the system.</p></div>
+      <div class="arg"><span class="ico">💸</span><h3>Block space is for money</h3>
+        <p>Block space is Bitcoin's scarcest resource and the one thing that <b>cannot be replaced</b>.
+          Cheap, permanent, replicated storage exists everywhere else. When block space is auctioned to
+          image storage, ordinary payments bid against a use case that never needed a censorship-resistant
+          monetary ledger in the first place.</p></div>
+      <div class="arg"><span class="ico">🧹</span><h3>The UTXO set never forgets</h3>
+        <p>Inscription and token schemes mint <b>economically dead dust outputs</b> — outputs nobody will
+          ever profitably spend. Every one is tracked by every validating node for as long as it stays
+          unspent. This is the one form of bloat that <b>cannot be pruned</b>, and it is the growth that
+          most directly raises the hardware floor for running a node.</p></div>
+      <div class="arg"><span class="ico">↩️</span><h3>Low-risk and self-expiring</h3>
+        <p>It is a <em>soft</em> fork — backwards-compatible, no chain split, non-upgraded nodes keep
+          following the chain. And it is explicitly <em>temporary</em>: the rules lapse automatically about
+          a year after activation. If it proves wrong, it undoes itself — a far smaller commitment than the
+          status quo, which changed by client default and has no expiry at all.</p></div>
+      <div class="arg"><span class="ico">📊</span><h3>Decided by the market, not a release note</h3>
+        <p>Nothing is imposed. Activation needs <b>55% of a difficulty period's 2016 blocks</b> to signal —
+          a measurable supermajority of hash power actively choosing the rule. Compare that with how the
+          limits were <em>removed</em>: a default changed in a software release.</p></div>
+      <div class="arg"><span class="ico">🗳️</span><h3>Your node is your vote</h3>
+        <p>Support is opt-in and verifiable. Run software that enforces the limits, tighten your own data
+          policy, and — if you mine — signal bit 4. This crawler exists so that choice is measurable in
+          public, in real time, rather than merely argued about.</p></div>
     </div>
+  </section>
+
+  <section>
+    <h2>How we got here</h2>
+    <p class="hint">BIP-110 is not a new restriction on Bitcoin. It restores one that held for nearly a
+      decade, and closes the specific techniques that got around it.</p>
+    <div class="grid two">
+      <div class="panel"><h3>2014–2022 · Data was always discouraged</h3>
+        <p>Bitcoin Core shipped data-carrier limits from 2014: a cap on <code class="inline">OP_RETURN</code>
+          payloads (settling at <b>83 bytes</b>) and limits on bare multisig. Putting arbitrary data on-chain
+          was never impossible — it was deliberately expensive and inconvenient, and that was the point.
+          But these were <b>standardness policy</b>, not consensus: a brake any miner could ignore, not a wall.</p></div>
+      <div class="panel"><h3>Jan 2023 · Ordinals bypasses every limit at once</h3>
+        <p>Inscriptions place arbitrary payloads inside a <b>tapscript witness</b>, wrapped in an
+          <code class="inline">OP_FALSE OP_IF … OP_ENDIF</code> envelope that never executes. That sidestepped
+          the data limits entirely <em>and</em> paid the SegWit <b>witness discount</b> — roughly
+          <b>4× cheaper per byte</b> than ordinary transaction data. Taproot had already lifted the
+          script-size ceiling, so payload size was effectively unbounded. Within weeks BRC-20 added token
+          minting on top, and with it dust outputs at scale.</p></div>
+      <div class="panel"><h3>Apr 2024 · Runes, and normalisation</h3>
+        <p>Runes launched at the halving using <code class="inline">OP_RETURN</code>. In fairness these are
+          <b>UTXO-friendlier</b> — an <code class="inline">OP_RETURN</code> output is provably unspendable and
+          never enters the UTXO set — but they still consume permanent block space, and they cemented the
+          idea that Bitcoin's ledger is a general-purpose data bus.</p></div>
+      <div class="panel"><h3>Oct 2025 · Core v30 removes the brake</h3>
+        <p>Bitcoin Core v30 removed the default <code class="inline">OP_RETURN</code> size limit, making large
+          data outputs relayable by default. The last standing policy brake came off — and it came off through
+          a <b>change of defaults in a software release</b>, not through any decision by the network.
+          <b>BIP-110 is the network's reply:</b> put the limits back where a release note cannot move them —
+          in consensus, and only for as long as the network votes to keep them.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The technical case</h2>
+    <p class="hint">What each rule actually closes, and why policy alone stopped working.</p>
+    <div class="grid two">
+      <div class="panel"><h3>The witness discount is being arbitraged</h3>
+        <p>SegWit prices witness bytes at <b>1 weight unit instead of 4</b>. That discount exists to make
+          signature data cheaper and encourage UTXO-efficient spending — it was never priced for bulk
+          storage. Taproot then removed the script-size ceiling for tapscript. Together they made the witness
+          the cheapest permanent storage in Bitcoin. <b>Rule 2</b> (256-byte push limit) and <b>rule 7</b>
+          (no <code class="inline">OP_IF</code> in tapscript) close that path directly.</p></div>
+      <div class="panel"><h3>Unexecuted data is still stored data</h3>
+        <p>The inscription envelope is <code class="inline">OP_FALSE OP_IF</code> — the branch never runs. The
+          payload does nothing, proves nothing and is validated by no one; it exists purely to ride along
+          inside a witness every node must keep forever. <b>Rule 7</b> makes reaching
+          <code class="inline">OP_IF</code> in tapscript invalid at all, which is why it is the single most
+          effective rule in the set.</p></div>
+      <div class="panel"><h3>The UTXO set is the part you can't prune</h3>
+        <p>Block data can be pruned; the <b>UTXO set cannot</b>. Every unspent output must be tracked by every
+          validating node to check the next block. Dust outputs minted by token schemes are rarely worth more
+          than the fee required to spend them, so they sit there indefinitely. <b>Rule 1</b> (34-byte outputs,
+          83 for <code class="inline">OP_RETURN</code>) removes the room those schemes need while leaving every
+          standard payment type untouched.</p></div>
+      <div class="panel"><h3>Policy was never binding — consensus is</h3>
+        <p>Relay policy is advice. Any miner can ignore it, and direct-to-miner submission routes around it
+          entirely; that is exactly how large payloads kept landing on-chain while nodes still "filtered" them.
+          BIP-110 promotes the same long-standing limits into <b>consensus</b> for roughly a year, so they bind
+          the whole network rather than only the polite parts of it.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>What the chain is carrying right now</h2>
+    <p class="hint">Measured by this node across the current difficulty period — not an estimate, and not
+      borrowed from a third party. <a href="/blocks">See the per-block breakdown →</a>
+      <span id="data-note" class="muted"></span></p>
+    <div class="grid cards" id="data-cards"><div class="loading">Loading chain data…</div></div>
   </section>
 
   <section>
     <h2>Where the network stands right now</h2>
     <p class="hint">Live figures from the crawler — real handshakes with reachable peers, updated continuously.
       <span id="live-note" class="muted"></span></p>
-    <div id="live-charts" class="grid charts">
+    <div id="live-charts" class="grid charts"><div class="loading">Loading live figures…</div>
       <div class="panel">
         <h3>Miner signalling</h3>
         <p class="sub">Block-version bit 4 in the current difficulty period (2016 blocks) — the authoritative activation signal.</p>
         <div class="big" id="sig-pct">—</div>
-        <div class="gauge-track"><div class="gauge-fill" id="sig-fill" style="width:0%"></div>
+        <div class="gauge-track spaced"><div class="gauge-fill" id="sig-fill" style="width:0%"></div>
           <div class="gauge-threshold" id="sig-thr" style="left:55%"></div></div>
         <p class="sub" id="sig-note" style="margin-top:26px;"></p>
       </div>
@@ -98,12 +178,12 @@
         <h3>Node readiness</h3>
         <p class="sub">Reachable nodes running BIP-110-ready software (detected from the user agent).</p>
         <div class="big" id="ready-pct">—</div>
-        <div class="bars" id="chart-ready" style="margin-top:16px;"></div>
+        <div class="bars labels-sm" id="chart-ready" style="margin-top:16px;"></div>
       </div>
       <div class="panel">
         <h3>Client software</h3>
         <p class="sub">Implementation mix across the reachable network.</p>
-        <div class="bars" id="chart-impl"></div>
+        <div class="bars labels-sm" id="chart-impl"></div>
       </div>
     </div>
   </section>

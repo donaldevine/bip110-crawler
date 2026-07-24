@@ -114,9 +114,20 @@ struct Args {
     /// confirmed within this long. Because the DB accumulates and a failed probe never
     /// overwrites a good one, this is what stops long-dead nodes inflating the totals —
     /// re-crawls refresh living peers, dead ones fall out. Set 0 to disable aging.
-    /// Keep it comfortably longer than one full crawl cycle.
-    #[arg(long, default_value_t = 48)]
+    ///
+    /// MUST be longer than a full re-crawl cycle, or nodes expire faster than the crawler
+    /// can re-confirm them and the count bleeds downwards. A cycle is slow because ~97% of
+    /// the gossiped address book is dead and every one costs a connection timeout, so
+    /// re-confirmation runs at only ~75 nodes/hour — revisiting ~23k nodes takes well over
+    /// a week. Hence the 14-day default; raise it further if you ever see totals sagging.
+    #[arg(long, default_value_t = 336)]
     max_age_hours: u64,
+
+    /// Max known-good peers to re-seed each crawl cycle from `--db` (0 = don't re-seed).
+    /// These go to the front of the queue so a re-crawl refreshes the live network before
+    /// grinding the mostly-dead address book.
+    #[arg(long, default_value_t = 50_000)]
+    reseed_max: usize,
 
     /// Number of concurrent clearnet probing workers. Probing is I/O-bound (mostly
     /// waiting on connect/handshake timeouts), so this can far exceed the CPU core count.
@@ -288,7 +299,7 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
                 args.signal_window, args.signal_bit
             );
             match client.signalling(args.signal_window, args.signal_bit) {
-                Ok(s) => {
+                Ok((s, _heights)) => {
                     eprintln!(
                         "[rpc] signalling: {}/{} blocks ({:.1}%)",
                         s.blocks_signalling, s.blocks_scanned, s.percent
@@ -300,6 +311,36 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
         }
         // Placeholder own-node record; folded in after the crawl.
         let _ = (version, services, ver, impl_name);
+    }
+
+    // ---- Re-seed from known-good peers in the DB ----
+    // On a re-crawl this is what keeps the site's numbers alive. Seeding only from the RPC
+    // peers means the cycle rediscovers everything from scratch and spends most of its time
+    // on the ~97%-dead address book, so known-good nodes get re-confirmed far too slowly and
+    // age out of the freshness window. Queuing them up front refreshes the live network
+    // first. They're depth-1 and deduped against the seeds we already have.
+    if let Some(dbpath) = &args.db {
+        match db::open(dbpath).and_then(|c| db::read_known_good(&c, args.reseed_max)) {
+            Ok(known) if !known.is_empty() => {
+                let have: std::collections::HashSet<String> =
+                    seeds.iter().map(|(p, _, _)| p.to_string()).collect();
+                let mut added = 0usize;
+                for addr in known {
+                    if have.contains(&addr) {
+                        continue;
+                    }
+                    // Peer::parse (not parse_seed) — these are stored ip:port/onion
+                    // literals, so this stays a pure parse with no DNS lookups.
+                    if let Some(peer) = Peer::parse(&addr, net.default_port) {
+                        seeds.push((peer, 1, None));
+                        added += 1;
+                    }
+                }
+                eprintln!("[reseed] queued {added} known-good peers from {}", dbpath.display());
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("[reseed] skipped ({e:#})"),
+        }
     }
 
     // ---- Extra CLI seeds ----
@@ -363,6 +404,22 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
     let live = args.watch || args.snapshot_interval > 0;
     let refresh = if args.page_refresh > 0 { args.page_refresh } else { 15 };
 
+    // How many recent blocks to (re-)fetch each time a new block arrives. Blocks are
+    // upserted by height, so this only needs to cover the newest few — the table keeps
+    // everything fetched before, and the explorer's history grows as the crawler runs.
+    const BLOCKS_PER_REFRESH: u32 = 30;
+    // Data-payload scans per new block. Each pulls a full verbose block over RPC, so keep
+    // the batch small: one new block arrives every ~10 minutes, and this still drains an
+    // initial backlog of 30 within a few hours.
+    const ANALYZE_PER_REFRESH: usize = 4;
+    // Per-refresh cap on backfilling the period's older signalling blocks (those outside the
+    // recent window). Each is one getblock+coinbase fetch. Before mandatory signalling (block
+    // 961632) only a handful of blocks per period signal, so this clears the whole backlog in
+    // a refresh or two and the explorer's detailed list quickly matches the header-scan count.
+    // Once the mandatory window is reached most/all of the period signals (up to ~2016 blocks);
+    // the cap then paces the backfill so a full period drains across refreshes, not one snapshot.
+    const STORE_SIGNALLING_PER_REFRESH: usize = 64;
+
     // Shared, refreshable signalling (incl. chain tip). Seeded with the startup scan and
     // re-measured from the node during the crawl (see the snapshot callback) so the
     // report's tip height + lock-in countdown track the chain instead of freezing.
@@ -396,9 +453,86 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
                 if let Ok(tip) = client.block_count() {
                     let cached_tip = signal_cache_cb.lock().unwrap().as_ref().map(|s| s.tip_height);
                     if cached_tip != Some(tip) {
+                        // The period scan returns the heights of every signalling block it
+                        // found; used below to backfill any that fall outside the recent
+                        // window, so the explorer's "signalling this period" list is
+                        // authoritative from the node, not just the recent blocks.
+                        let mut signalling_heights: Vec<i64> = Vec::new();
                         match client.signalling(signal_window, signal_bit) {
-                            Ok(s) => *signal_cache_cb.lock().unwrap() = Some(s),
+                            Ok((s, heights)) => {
+                                *signal_cache_cb.lock().unwrap() = Some(s);
+                                signalling_heights = heights;
+                            }
                             Err(e) => eprintln!("[snapshot] signalling refresh failed: {e:#}"),
+                        }
+                        // Same new-block trigger feeds the /blocks explorer. Only the
+                        // crawler holds an RPC connection, so it stores blocks and the API
+                        // server just reads them. Blocks are immutable → upsert by height,
+                        // so the table accumulates without ever re-fetching old ones.
+                        if let Some(dbpath) = &db_path {
+                            match client.recent_blocks(BLOCKS_PER_REFRESH, signal_bit) {
+                                Ok(blocks) => match db::open(dbpath) {
+                                    Ok(mut c) => {
+                                        if let Err(e) = db::write_blocks(&mut c, &blocks) {
+                                            eprintln!("[blocks] store failed: {e:#}");
+                                        }
+                                        // Backfill the period's signalling blocks that aren't
+                                        // stored yet (those older than the recent window). The
+                                        // scan already found their heights for free; fetch full
+                                        // detail for a capped batch and upsert, so the list is
+                                        // authoritative and any backlog drains over refreshes.
+                                        // The payload/fee analysis below then enriches them.
+                                        match db::unstored_heights(&c, &signalling_heights) {
+                                            Ok(mut missing) => {
+                                                missing.sort_unstable_by(|a, b| b.cmp(a)); // newest first
+                                                missing.truncate(STORE_SIGNALLING_PER_REFRESH);
+                                                if !missing.is_empty() {
+                                                    match client.blocks_at_heights(&missing, signal_bit) {
+                                                        Ok(sb) => {
+                                                            if let Err(e) = db::write_blocks(&mut c, &sb) {
+                                                                eprintln!("[blocks] signalling store failed: {e:#}");
+                                                            }
+                                                        }
+                                                        Err(e) => eprintln!("[blocks] signalling backfill failed: {e:#}"),
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => eprintln!("[blocks] unstored-heights query failed: {e:#}"),
+                                        }
+                                        // Scan a few not-yet-analysed blocks for data
+                                        // payloads. Each needs the full verbose block from
+                                        // RPC (tens of MB), so cap the batch — any backlog
+                                        // drains over subsequent blocks rather than
+                                        // stalling this snapshot.
+                                        match db::blocks_needing_analysis(&c, ANALYZE_PER_REFRESH) {
+                                            Ok(pending) => {
+                                                for (height, hash) in pending {
+                                                    match client.analyze_block(&hash) {
+                                                        Ok(p) => {
+                                                            // Fees are a bonus: keep the
+                                                            // payload scan even if
+                                                            // getblockstats is unavailable.
+                                                            let s = client.block_stats(height).ok();
+                                                            if let Err(e) = db::write_block_analysis(
+                                                                &c, height, &p, s.as_ref(),
+                                                            ) {
+                                                                eprintln!("[blocks] analysis store failed at {height}: {e:#}");
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            eprintln!("[blocks] analyse {height} failed: {e:#}");
+                                                            break; // pruned/unavailable — stop for now
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => eprintln!("[blocks] pending query failed: {e:#}"),
+                                        }
+                                    }
+                                    Err(e) => eprintln!("[blocks] db open failed: {e:#}"),
+                                },
+                                Err(e) => eprintln!("[blocks] fetch failed: {e:#}"),
+                            }
                         }
                     }
                 }

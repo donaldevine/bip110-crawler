@@ -1,4 +1,13 @@
 let DATA = /*__DATA__*/null;
+// Loading placeholders seeded in the HTML: swept once real data has rendered, or switched to an
+// error state if the first fetch never lands. In serve mode the page boots with an EMPTY dataset
+// skeleton (generated_at ""), so the first paint would fill every card with zeros — hasData()
+// gates that, leaving the placeholders up until real data arrives.
+const doneLoading = () => document.querySelectorAll(".loading").forEach(e => e.remove());
+const failLoading = msg => document.querySelectorAll(".loading").forEach(e => {
+  e.classList.add("err"); e.textContent = msg;
+});
+const hasData = () => !!(DATA && DATA.generated_at);
 const WORLD = /*__WORLD__*/null;  // [{n:name, r:[[[lon,lat],...],...]}, ...]
 
 // ---- palette: implementation -> categorical slot (fixed order, not cycled) ----
@@ -644,11 +653,15 @@ const table = (function(){
   return { refresh(){ syncOptions(); load(); } };
 })();
 
-document.getElementById("disclaimer").textContent =
-  "Note: peer edges come from getaddr address gossip (reachability), not confirmed live "
-  + "connections. Per-node BIP-110 readiness is detected from the node's advertised user agent "
-  + "(builds carrying a BIP-110/UASF-BIP110 tag); the authoritative activation signal is the "
-  + "miner block-version signalling shown above.";
+// innerHTML (not textContent) so the listening-nodes caveat can link to the fuller
+// explanation on /stats. The string is a fixed literal — no interpolated data.
+document.getElementById("disclaimer").innerHTML =
+  "Note: counts are <b>listening</b> (reachable) nodes — non-listening full nodes enforce the "
+  + "same rules but accept no connections, so no crawler can see them "
+  + "(<a href=\"/stats\">details</a>). Peer edges come from getaddr address gossip "
+  + "(reachability), not confirmed live connections. Per-node BIP-110 readiness is detected from "
+  + "the node's advertised user agent (builds carrying a BIP-110/UASF-BIP110 tag); the "
+  + "authoritative activation signal is the miner block-version signalling shown above.";
 
 // ---- assemble everything, then live-poll data.json when running under --watch ----
 function renderAll(){
@@ -659,8 +672,11 @@ function renderAll(){
   graph.update(DATA);
   geoMap.update(DATA);
   table.refresh();
+  doneLoading();
 }
-renderAll();
+// Skip the first paint when the dataset is the empty serve-mode skeleton: rendering it would
+// replace the loading placeholders with a full page of zeros.
+if (hasData()) renderAll();
 
 // Data source: in `serve` mode API_URL is set and we fetch/poll the API; otherwise we
 // use the inlined DATA and (in --watch mode) poll data.json.
@@ -668,10 +684,12 @@ const API_URL = /*__API_URL__*/null;
 async function pollOnce(url){
   try {
     const resp = await fetch(url + (url.includes("?")?"&":"?") + "_=" + Date.now(), {cache:"no-store"});
-    if (!resp.ok) return;
+    if (!resp.ok){ if (!hasData()) failLoading("Couldn't load crawler data — retrying…"); return; }
     const fresh = await resp.json();
     if (fresh && fresh.generated_at !== DATA.generated_at){ DATA = fresh; renderAll(); }
-  } catch(e){ /* offline / file:// — keep last data */ }
+  } catch(e){       // offline / file:// — keep last data
+    if (!hasData()) failLoading("Couldn't load crawler data — retrying…");
+  }
 }
 if (API_URL){
   pollOnce(API_URL);                                   // initial load from the API

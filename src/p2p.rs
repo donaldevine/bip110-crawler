@@ -410,9 +410,12 @@ fn parse_addrv2(payload: &[u8], default_port: u16) -> Vec<Peer> {
             None => break,
         };
         pos += 1;
+        // Cap the field length: every real addrv2 address is <= 32 bytes (Tor v3 / I2P), so
+        // anything larger is a malformed or hostile record. This also guards the
+        // `pos + addr_len` slice below from overflowing on an absurd varint.
         let addr_len = match read_varint(payload, &mut pos) {
-            Ok(l) => l as usize,
-            Err(_) => break,
+            Ok(l) if l <= 512 => l as usize,
+            _ => break,
         };
         let addr_bytes = match payload.get(pos..pos + addr_len) {
             Some(b) => b.to_vec(),

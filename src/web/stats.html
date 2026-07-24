@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crawl stats · BIP-110</title>
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="BIP-110 crawl stats">
+<meta name="twitter:description" content="How much of the Bitcoin address book is actually reachable, and how the client mix shifts over time.">
+<meta name="twitter:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="BIP-110 crawl stats">
+<meta property="og:description" content="How much of the Bitcoin address book is actually reachable, and how the client mix shifts over time.">
+<meta property="og:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:url" content="https://bip110.xyz/stats">
+<style>
+/*__CSS__*/
+</style>
+</head>
+<body>
+<div class="wrap narrow">
+  <nav>
+    <span class="brand">▚ BIP-110</span>
+    <span class="links">
+      <a href="/">◂ Live crawler</a>
+      <a href="/why">Why BIP-110?</a>
+      <a href="/code">Code</a>
+      <a href="/blocks">⛓ Blocks</a>
+      <a href="/support">⚡ Support</a>
+    </span>
+  </nav>
+
+  <div class="hero">
+    <span class="tag">Crawler internals</span>
+    <h1>Crawl <span class="accent">stats</span></h1>
+    <p class="lead">What it actually takes to map the Bitcoin network: how much of the gossiped
+      address book responds, and how the client mix moves over time. Everything below is
+      measured from this crawler's own database.</p>
+  </div>
+
+  <div class="grid cards" id="cards"><div class="loading">Loading…</div></div>
+
+  <section>
+    <h2>Signal vs noise in the address book</h2>
+    <p class="hint"><b>The big number is addresses, not machines — there are nowhere near that
+      many nodes out there.</b> <code>getaddr</code> doesn't return a peer's live connections;
+      it returns its whole <b>address book</b> — every address it has heard of over months —
+      and we take the union of that across thousands of peers. Two things inflate it hugely:
+      dead nodes are remembered and keep circulating through gossip long after they're gone,
+      and <b>one machine emits many addresses over time</b>. That second effect dominates, and
+      this crawler's own data shows it: <b>83% of the never-answering IPv6 addresses share a
+      /64</b> — a single host's own subnet, which privacy addressing rotates constantly (one
+      /64 here accounts for ~2,900 addresses on its own) — and <b>72% of the IPv4 ones share a
+      /24</b>, typical of dynamic ISP ranges and Tor exit pools.<br>
+      So read it as "every address ever gossiped to us, mostly the same hosts over and over",
+      not as a node count. <b>The reachable figure is the real one.</b> Each dead address still
+      costs a full connection timeout to rule out, which is why the crawler can look busy while
+      finding almost nothing new.</p>
+    <div class="panel">
+      <div class="split" id="split"><div class="loading">Loading…</div></div>
+      <div class="split-legend" id="split-legend"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Client versions over time</h2>
+    <p class="hint">Hourly population of reachable nodes per <b>client version</b> (e.g.
+      <code>Bitcoin Knots 29.3.0</code>), recorded by the crawler as it runs — so you can watch
+      releases roll out and old ones drain away. Only the <b>10 most common versions</b> are
+      plotted; the network runs about a hundred, but the rest are a long tail of a handful of
+      nodes each. Lines are coloured by client — Knots orange, Core blue — with lighter shades
+      separating versions of the same client. Hover a line for its version and node count.
+      This series starts from the first run of the build that added it and grows from here.</p>
+    <div class="panel">
+      <div id="history-wrap">
+        <div class="loading">Loading history…</div><canvas id="history"></canvas>
+        <div class="tooltip" id="htip"></div>
+      </div>
+      <div class="legend" id="history-legend"></div>
+      <p class="note" id="history-note"></p>
+    </div>
+  </section>
+
+  <p class="disclaimer" id="disclaimer"></p>
+  <footer>bip110.xyz · a live BIP-110 node crawler · <span id="gen"></span></footer>
+</div>
+
+<script>
+/*__JS__*/
+</script>
+</body>
+</html>

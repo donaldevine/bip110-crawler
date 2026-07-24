@@ -14,17 +14,18 @@
 <meta property="og:image" content="https://bip110.xyz/summary_large_image.png">
 <meta property="og:url" content="https://bip110.xyz/code">
 <style>
-/*__THEME__*/
 /*__CSS__*/
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap narrow">
   <nav>
     <span class="brand">▚ BIP-110</span>
-    <span style="display:flex; gap:10px; flex-wrap:wrap;">
+    <span class="links">
       <a href="/">◂ Live crawler</a>
       <a href="/why">Why BIP-110?</a>
+      <a href="/stats">📊 Stats</a>
+      <a href="/blocks">⛓ Blocks</a>
       <a href="/support">⚡ Support</a>
     </span>
   </nav>
@@ -53,8 +54,9 @@
           usual 520), via <code class="inline">MAX_SCRIPT_ELEMENT_SIZE_REDUCED</code>. A BIP16 P2SH
           <code class="inline">redeemScript</code> push is exempted so existing P2SH keeps working.</p></div></div>
       <div class="rule"><span class="rn">3</span><div><h3>Undefined witness versions</h3>
-        <p>Spending an output with an <b>undefined witness version</b> becomes invalid (creating one stays
-          valid). This also closes a Bitcoin Core edge case around anchor outputs.</p></div></div>
+        <p>Spending an output with an <b>undefined</b> witness (or Tapleaf) version becomes invalid — only
+          the defined types stay spendable: SegWit&nbsp;v0, Taproot (v1), and <b>P2A</b> (pay-to-anchor).
+          <em>Creating</em> such an output is still valid; only <em>spending</em> it is blocked.</p></div></div>
       <div class="rule"><span class="rn">4</span><div><h3>Taproot annex rejected</h3>
         <p>A witness stack that carries a Taproot <b>annex</b> is invalid. Previously the annex was merely
           non-standard policy; BIP-110 makes rejecting it a consensus rule.</p></div></div>

@@ -55,6 +55,58 @@
     const total = a.total_nodes || 0;
     const note = document.getElementById("live-note");
     if (note && total) note.textContent = "· " + total.toLocaleString() + " reachable nodes · updated " + (d.generated_at||"").slice(11,19) + " UTC";
+    // This section fills its panels in place rather than replacing the container, so its
+    // loading placeholder has to be cleared explicitly. Scoped to #live-charts so it can't
+    // remove the chain-data placeholder, which belongs to a separate fetch.
+    const lc = document.getElementById("live-charts");
+    if (lc) lc.querySelectorAll(".loading").forEach(e => e.remove());
   }
+  // ---- what the chain is actually carrying, measured over the current difficulty period ----
+  // Deliberately sourced from this node's own analysis rather than quoted from elsewhere: the
+  // whole point of the page is that the claim is checkable against the chain in front of you.
+  async function loadChainData(){
+    const el = document.getElementById("data-cards");
+    if (!el) return;
+    let d;
+    try {
+      const r = await fetch("/api/blocks?limit=1&_=" + Date.now(), {cache:"no-store"});
+      if (!r.ok) throw 0;
+      d = await r.json();
+    } catch(e){
+      el.innerHTML = '<div class="panel muted">Chain figures load when this page is served by the '
+        + 'crawler. Open <a href="/blocks">the block explorer</a> to see current numbers.</div>';
+      return;
+    }
+    const p = (d && d.period) || {}, ps = p.stats || {};
+    const analysed = ps.analysed || 0;
+    if (!analysed){
+      el.innerHTML = '<div class="panel muted">The crawler has not finished analysing blocks in this '
+        + 'period yet — figures appear as the scan progresses.</div>';
+      return;
+    }
+    const fmt = n => Number(n || 0).toLocaleString();
+    const budget = analysed * 4000000;                       // 4M weight units per block
+    const dataPct   = budget ? (ps.payload_weight || 0) / budget * 100 : 0;
+    const rejectPct = budget ? (ps.reject_weight  || 0) / budget * 100 : 0;
+    const cards = [
+      ["Block space to data", dataPct.toFixed(1) + "%",
+        "of total block weight, this period"],
+      ["Inscriptions", fmt(ps.insc_count),
+        "ordinals envelopes written on-chain"],
+      ["Runestones", fmt(ps.rune_count),
+        "OP_RETURN token payloads"],
+      ["BIP-110 would reject", rejectPct.toFixed(1) + "%",
+        "of block weight, by the seven rules"],
+    ];
+    el.innerHTML = cards.map(([l,v,n]) =>
+      `<div class="card"><div class="label">${l}</div>
+       <div class="value">${v}</div><div class="note">${n}</div></div>`).join("");
+    const note = document.getElementById("data-note");
+    if (note) note.textContent = "· across " + fmt(analysed) + " analysed blocks"
+      + (p.scanned ? " of " + fmt(p.scanned) + " in the period" : "");
+  }
+
   loadLive();
+  loadChainData();
   setInterval(loadLive, 30000);
+  setInterval(loadChainData, 30000);

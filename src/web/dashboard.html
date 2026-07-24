@@ -19,7 +19,6 @@
     <meta property="og:url" content="https://bip110.xyz/">
 
 <style>
-/*__THEME__*/
 /*__CSS__*/
 </style>
 </head>
@@ -33,11 +32,13 @@
     <div style="display:flex; gap:10px; flex-wrap:wrap;">
       <a class="theme-toggle" href="/why">★ Why support BIP-110?</a>
       <a class="theme-toggle" href="/code">⟨/⟩ Code walkthrough</a>
+      <a class="theme-toggle" href="/stats">📊 Crawl stats</a>
+      <a class="theme-toggle" href="/blocks">⛓ Blocks</a>
       <a class="theme-toggle" href="/support">⚡ Support</a>
     </div>
   </header>
 
-  <div class="grid cards" id="cards"></div>
+  <div class="grid cards" id="cards"><div class="loading">Loading…</div></div>
 
   <section>
     <h2>Miner signalling for BIP-110 (block version bit 4)</h2>
@@ -45,7 +46,7 @@
       the 2016 blocks in a <b>difficulty adjustment period</b> set bit 4 in their version
       field — the tally is counted per retarget period, not over a rolling window. Measured
       by scanning the current period's block headers from your own node — not from peer gossip.</p>
-    <div class="panel" id="signal-panel"></div>
+    <div class="panel" id="signal-panel"><div class="loading">Loading signalling…</div></div>
   </section>
 
   <section id="timeline-section">
@@ -54,8 +55,11 @@
       before a guaranteed lock-in — during that window, blocks that don't signal bit 4 are
       rejected as invalid. Being a <b>temporary</b> soft fork, it then expires ~1 year
       (52,416 blocks) after activation, and the data limits are lifted. The countdown is
-      estimated from the current chain tip at ~10 min/block.</p>
-    <div class="panel" id="timeline-panel"></div>
+      estimated from the current chain tip at ~10 min/block. The milestone heights below
+      assume the <b>guaranteed-latest</b> path (mandatory lock-in at 963,648); if miners reach
+      55% signalling in an earlier period, lock-in — and every date after it — arrives
+      sooner.</p>
+    <div class="panel" id="timeline-panel"><div class="loading">Loading timeline…</div></div>
   </section>
 
   <section>
@@ -68,7 +72,7 @@
       network is larger. The cards and charts above always cover the full network.
       <span id="graph-shown" class="cap-note"></span></p>
     <div class="graph-wrap panel">
-      <canvas id="graph"></canvas>
+      <div class="loading">Loading network map…</div><canvas id="graph"></canvas>
       <div class="tooltip" id="gtip"></div>
       <div class="legend" id="legend"></div>
     </div>
@@ -83,7 +87,7 @@
       <b>Note:</b> like the network map, this plots up to <b>3,000</b> nodes; totals above are full.
       <span id="geo-shown" class="cap-note"></span></p>
     <div class="graph-wrap panel">
-      <canvas id="geomap"></canvas>
+      <div class="loading">Loading geo map…</div><canvas id="geomap"></canvas>
       <div class="tooltip" id="mtip"></div>
       <div class="legend" id="geolegend"></div>
     </div>
@@ -134,7 +138,7 @@
           <th data-k="depth">Depth</th>
           <th data-k="bip110">BIP-110</th>
         </tr></thead>
-        <tbody></tbody>
+        <tbody><tr><td colspan="6"><div class="loading">Loading nodes…</div></td></tr></tbody>
       </table>
     </div>
     <div class="pager">

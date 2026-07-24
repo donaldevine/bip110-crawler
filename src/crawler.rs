@@ -242,15 +242,18 @@ pub fn crawl(seeds: Vec<(Peer, u32, Option<NodeInfo>)>, cfg: CrawlConfig, io: Cr
         save_state(&shared, path);
     }
 
-    let (nodes_map, edges) = Arc::try_unwrap(shared)
-        .ok()
-        .map(|s| {
-            (
-                s.nodes.into_inner().unwrap(),
-                s.edges.into_inner().unwrap(),
-            )
-        })
-        .unwrap_or_default();
+    // Every worker and the monitor are joined above, so no other Arc owner should remain and
+    // this unwrap succeeds. If it somehow doesn't, clone the data out under lock rather than
+    // discard the entire crawl — the previous `unwrap_or_default()` silently returned nothing.
+    let (nodes_map, edges) = match Arc::try_unwrap(shared) {
+        Ok(s) => (s.nodes.into_inner().unwrap(), s.edges.into_inner().unwrap()),
+        Err(shared) => {
+            eprintln!("[crawl] warning: shared state still referenced at finish; cloning out");
+            let nodes = shared.nodes.lock().unwrap().clone();
+            let edges = shared.edges.lock().unwrap().clone();
+            (nodes, edges)
+        }
+    };
 
     CrawlResult {
         nodes: nodes_map.into_values().collect(),
@@ -343,6 +346,26 @@ fn finish_task(shared: &Arc<Shared>, new_clearnet: Vec<Task>, new_onion: Vec<Tas
     }
 }
 
+/// Whether a failed probe is worth retrying. Only a timeout (the peer was silent or too slow)
+/// can plausibly succeed on a second attempt. A refused/reset/unreachable connection is a
+/// deterministic answer — the host is up but not a reachable peer — so retrying it only burns
+/// a worker, which matters a lot when most gossiped addresses are dead. A non-IO failure (e.g.
+/// a protocol error mid-handshake) means the peer *did* respond, so we allow a retry.
+///
+/// The connect error is wrapped with context in `probe_peer`, so we walk the whole cause chain
+/// rather than inspecting only the top-level error.
+fn worth_retrying(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+    true
+}
+
 fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
     while let Some((addr, depth)) = next_task(&shared, onion_pool) {
         // Respect the global node cap (0 = unlimited).
@@ -351,8 +374,10 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
             continue;
         }
 
-        // Try to reach the peer, retrying a few times before giving up — many gossiped
-        // addresses are just momentarily slow rather than truly down.
+        // Try to reach the peer, retrying a bounded number of times — but only for failures a
+        // retry can plausibly fix (timeouts). An actively refused/reset connection is a
+        // deterministic "not a reachable peer", so retrying it just burns a worker on the
+        // ~97%-dead address book; those give up after the first attempt.
         let probe_once = || {
             p2p::probe_peer(
                 &addr,
@@ -365,7 +390,10 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
         };
         let mut probe = probe_once();
         let mut attempt = 0;
-        while probe.is_err() && attempt < cfg.retries {
+        while attempt < cfg.retries {
+            if !matches!(&probe, Err(e) if worth_retrying(e)) {
+                break;
+            }
             attempt += 1;
             probe = probe_once();
         }
@@ -454,5 +482,30 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
         }
 
         finish_task(&shared, new_clearnet, new_onion);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Context;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn retry_only_on_timeouts() {
+        let io = |k: ErrorKind| anyhow::Error::new(std::io::Error::from(k));
+        // Deterministic failures — a retry can't change the answer.
+        assert!(!worth_retrying(&io(ErrorKind::ConnectionRefused)));
+        assert!(!worth_retrying(&io(ErrorKind::ConnectionReset)));
+        // Timeouts — the peer was silent/slow, so a retry is worth it.
+        assert!(worth_retrying(&io(ErrorKind::TimedOut)));
+        assert!(worth_retrying(&io(ErrorKind::WouldBlock)));
+        // The kind must survive the context wrap probe_peer adds around the connect error.
+        let wrapped = io(ErrorKind::TimedOut).context("connect 1.2.3.4:8333");
+        assert!(worth_retrying(&wrapped));
+        let wrapped_refused = io(ErrorKind::ConnectionRefused).context("connect 1.2.3.4:8333");
+        assert!(!worth_retrying(&wrapped_refused));
+        // A non-IO failure means the peer responded but the handshake/parse failed — retryable.
+        assert!(worth_retrying(&anyhow::anyhow!("peer never sent version")));
     }
 }

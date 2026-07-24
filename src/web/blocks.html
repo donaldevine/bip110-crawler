@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Block explorer · BIP-110</title>
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="BIP-110 block explorer">
+<meta name="twitter:description" content="Recent Bitcoin blocks, showing which miners signal BIP-110 and which don't.">
+<meta name="twitter:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="BIP-110 block explorer">
+<meta property="og:description" content="Recent Bitcoin blocks, showing which miners signal BIP-110 and which don't.">
+<meta property="og:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:url" content="https://bip110.xyz/blocks">
+<style>
+/*__CSS__*/
+</style>
+</head>
+<body>
+<div class="wrap narrow">
+  <nav>
+    <span class="brand">▚ BIP-110</span>
+    <span class="links">
+      <a href="/">◂ Live crawler</a>
+      <a href="/why">Why BIP-110?</a>
+      <a href="/code">Code</a>
+      <a href="/stats">📊 Stats</a>
+      <a href="/support">⚡ Support</a>
+    </span>
+  </nav>
+
+  <div class="hero">
+    <span class="tag">Block explorer</span>
+    <h1>Blocks &amp; <span class="accent">signalling</span></h1>
+    <p class="lead">The most recent blocks on the chain, read straight from this node.
+      Blocks whose miner sets version bit 4 are <b class="ok-text">signalling BIP-110</b>;
+      the rest are <b class="bad-text">not signalling</b> — every one of those is a block
+      that could have counted toward the 55% lock-in threshold and didn't.</p>
+  </div>
+
+  <div class="grid cards" id="cards"><div class="loading">Loading…</div></div>
+
+  <section>
+    <h2>Recent blocks</h2>
+    <p class="hint">Newest first. Each tile is one block — hover for details. Colour shows
+      only whether the miner set the signalling bit; it is not a judgement of the block's
+      transactions, which are valid either way.</p>
+    <div class="panel">
+      <div class="blockgrid" id="blockgrid"><div class="loading">Loading…</div></div>
+      <div class="tooltip" id="btip"></div>
+      <div class="legend" id="blocklegend"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>BIP-110 signalling this period</h2>
+    <p class="hint" id="period-hint">The blocks in the <b>current difficulty period</b> (2016
+      blocks, evaluated at the retarget boundary) whose miner set version bit 4 — the ones
+      actually voting for BIP-110 lock-in. This lists blocks the crawler has recorded in the
+      period; it accumulates as the crawler runs.</p>
+    <div class="callout" id="period-left" style="display:none;margin:0 0 16px;"></div>
+    <div class="panel" style="overflow-x:auto;">
+      <table id="period-table">
+        <thead><tr>
+          <th>Height</th>
+          <th>Miner</th>
+          <th>Txs</th>
+          <th title="Block version field (hex); bit 4 is the BIP-110 signal">Version</th>
+          <th>Data payloads</th>
+          <th title="Whole-transaction weight carrying a data payload, as a share of the 4M weight-unit block budget">Wt %</th>
+          <th title="Total fees paid to the miner in this block">Fees</th>
+          <th>Size</th>
+          <th>Age</th>
+        </tr></thead>
+        <tbody><tr><td colspan="9"><div class="loading">Loading signalling blocks…</div></td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Block detail</h2>
+    <p class="hint">Every block the crawler has recorded, newest first. <b>Data payloads</b>
+      are detected by protocol signature: <b>inscriptions</b> (ordinals — an
+      <code>OP_FALSE OP_IF "ord"</code> envelope in a tapscript witness), <b>runes</b>
+      (a runestone <code>OP_RETURN OP_13</code> output), and other <b>OP_RETURN</b> data
+      carriers. <b>Wt %</b> is the share of the block's 4M weight-unit budget taken by
+      transactions carrying such a payload — whole-transaction weight, so it's an upper
+      bound: those transactions usually move real value too.<br>
+      <b>BIP-110 rejects</b> counts transactions the soft fork would actually have made
+      invalid: inscriptions (rule 7 bans <code>OP_IF</code> in tapscript), witness items over
+      256 bytes (rule 2), outputs over their size limit (rule 1 — 34 bytes, or 83 for an
+      <code>OP_RETURN</code>), and Taproot annexes (rule 4). A <b>small runestone or
+      <code>OP_RETURN</code> stays valid</b> under rule 1's 83-byte allowance, so those alone
+      are not rejects. It remains a lower bound — rules 3, 5 and 6 (undefined witness versions,
+      oversized control blocks, <code>OP_SUCCESS</code>) can't be detected from block data
+      here.</p>
+    <div class="panel" style="overflow-x:auto;">
+      <table id="blocks-table">
+        <thead><tr>
+          <th>Height</th>
+          <th>Signalling</th>
+          <th>Miner</th>
+          <th>Txs</th>
+          <th>Data payloads</th>
+          <th title="Whole-transaction weight carrying a data payload, as a share of the 4M weight-unit block budget">Wt %</th>
+          <th title="Transactions BIP-110 would have rejected (inscriptions / oversized pushes)">BIP-110 rejects</th>
+          <th title="Total fees paid to the miner in this block">Fees</th>
+          <th title="Median fee rate paid by transactions in this block">Median rate</th>
+          <th>Size</th>
+          <th>Age</th>
+        </tr></thead>
+        <tbody><tr><td colspan="11"><div class="loading">Loading block detail…</div></td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="disclaimer" id="disclaimer"></p>
+  <footer>bip110.xyz · a live BIP-110 node crawler · <span id="gen"></span></footer>
+</div>
+
+<!-- Announces a newly-mined block; shown by blocks.js, hidden by default. -->
+<div class="newblock" id="newblock"></div>
+
+<script>
+/*__JS__*/
+</script>
+</body>
+</html>

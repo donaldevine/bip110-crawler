@@ -257,39 +257,38 @@ pub struct SignalStats {
     pub tip_height: i64,
 }
 
-/// Whether the chain looks split, assessed from this node's own view plus the crawl.
+/// Whether the chain looks split, from two signals — both grounded in identity, not inference,
+/// which is what keeps this from crying wolf:
 ///
-/// Mandatory signalling is the moment a split becomes possible: a node enforcing BIP-110
-/// rejects blocks that don't set bit 4, so if miners don't signal, enforcing and non-enforcing
-/// nodes follow different chains. Two independent signals are combined:
+/// * **Peer block-hash clusters.** Peers grouped by the block hash they reported at the
+///   reference height (the same survey the /chains page shows). A second cluster with real
+///   support means peers are provably on a different chain. This is the primary signal.
+/// * **`getchaintips` invalid branches.** A branch our own node marked `invalid` *near the
+///   tip* — a rule rejection, not an orphan race.
 ///
-/// * `getchaintips` on our node — authoritative for what WE reject. A branch we mark
-///   `invalid` is the split signature; ordinary orphan races only ever appear as very short
-///   branches, hence `MIN_FORK_LEN`.
-/// * Peer tip heights grouped by BIP-110 readiness — corroboration from the network. A real
-///   split drives those two medians apart and keeps them apart.
-///
-/// Note `start_height` is each peer's tip *at handshake time*, and an exhaustive crawl spans
-/// hours, so a modest spread is normal probe skew rather than evidence of a split. Only the
-/// gap between the two medians is meaningful, and only well beyond that skew.
+/// Deliberately NOT used as triggers: the length of `valid-fork` / `headers-only` branches
+/// (getchaintips lists every stale tip a node ever heard of, so those are routine), and peer
+/// tip-height medians (an exhaustive crawl spans hours, so heights drift from probe timing
+/// alone). Both produced false positives and are gone.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChainSplit {
     /// True when the evidence clears the thresholds below.
     pub split: bool,
     /// Our node's active tip height.
     pub active_height: i64,
-    /// Branches we know of that aren't the active chain (branchlen > 0).
+    /// Branches we know of that aren't the active chain (branchlen > 0). Informational.
     pub forks: Vec<ForkTip>,
-    /// Longest non-active branch length.
+    /// Longest non-active branch length. Informational only — NOT a trigger.
     pub longest_fork: i64,
-    /// Branches our node considers INVALID — the BIP-110 rejection signature.
+    /// Branches our node considers INVALID near the tip — a genuine rule rejection.
     pub rejected_branches: u32,
-    /// Median tip height of reachable BIP-110-ready peers (0 when unknown).
-    pub ready_median_height: i64,
-    /// Median tip height of reachable peers that are NOT BIP-110 ready.
-    pub other_median_height: i64,
-    pub ready_peers: u32,
-    pub other_peers: u32,
+    /// Peers that reported a block hash at the reference height (the survey population).
+    pub responded: u32,
+    /// Distinct block hashes seen across those peers — 1 means everyone agrees.
+    pub distinct_chains: u32,
+    /// Node count on the largest chain, and on the next-largest (the competing one).
+    pub largest_chain: u32,
+    pub second_chain: u32,
 }
 
 /// A non-active branch, flattened for the report.
@@ -300,16 +299,19 @@ pub struct ForkTip {
     pub status: String,
 }
 
-/// Orphan races routinely produce 1–2 block branches; a consensus split does not resolve, so
-/// a *valid* competing branch only counts once it is longer than a normal reorg.
-pub const MIN_FORK_LEN: i64 = 3;
-/// A branch our node rejected outright counts sooner — that is a rule disagreement, not a race.
+/// A branch our node rejected counts from length 1 — that is a rule disagreement, not a race.
 pub const MIN_REJECTED_FORK_LEN: i64 = 1;
-/// How far the two medians must diverge before peer heights corroborate a split. An exhaustive
-/// crawl takes hours, so peers probed at different times legitimately differ by tens of blocks.
-pub const MIN_MEDIAN_GAP: i64 = 60;
+/// An `invalid` branch only signals a *current* split if its tip is near ours. `getchaintips`
+/// retains ancient known-invalid tips forever; those are history, not a live fork.
+pub const REJECT_RECENCY: i64 = 2016;
+/// A real network split needs a competing chain with genuine support, not one stray or
+/// misconfigured peer reporting an odd block.
+pub const MIN_SPLIT_CLUSTER: u32 = 10;
 
 /// Build the split assessment from our node's chain tips and the crawled peer set.
+///
+/// Peers must carry `chain_hash` (populated by the `--chain-check` header survey) for the
+/// network signal; without it only our node's own `invalid`-branch signal is available.
 pub fn assess_chain_split(tips: &[crate::rpc::ChainTip], peers: &[&NodeInfo]) -> ChainSplit {
     let active_height = tips.iter().find(|t| t.status == "active").map(|t| t.height).unwrap_or(0);
     let forks: Vec<ForkTip> = tips
@@ -318,39 +320,34 @@ pub fn assess_chain_split(tips: &[crate::rpc::ChainTip], peers: &[&NodeInfo]) ->
         .map(|t| ForkTip { height: t.height, branchlen: t.branchlen, status: t.status.clone() })
         .collect();
     let longest_fork = forks.iter().map(|f| f.branchlen).max().unwrap_or(0);
+    // Only INVALID branches near the tip. A valid-fork / headers-only branch of any length is
+    // routine (getchaintips lists every stale tip), and an ancient invalid tip is old history.
     let rejected_branches = forks
         .iter()
-        .filter(|f| f.status == "invalid" && f.branchlen >= MIN_REJECTED_FORK_LEN)
+        .filter(|f| {
+            f.status == "invalid"
+                && f.branchlen >= MIN_REJECTED_FORK_LEN
+                && (active_height == 0 || (active_height - f.height).abs() <= REJECT_RECENCY)
+        })
         .count() as u32;
 
-    // Median tip height per readiness group, over peers that actually handshook.
-    let median = |mut v: Vec<i64>| -> i64 {
-        if v.is_empty() { return 0; }
-        v.sort_unstable();
-        v[v.len() / 2]
-    };
-    let heights = |ready: bool| -> Vec<i64> {
-        peers
-            .iter()
-            .filter(|n| n.handshaked && n.start_height > 0
-                && matches!(n.bip110, Bip110Stance::Enforcing) == ready)
-            .map(|n| n.start_height as i64)
-            .collect()
-    };
-    let (rh, oh) = (heights(true), heights(false));
-    let (ready_peers, other_peers) = (rh.len() as u32, oh.len() as u32);
-    let (ready_median_height, other_median_height) = (median(rh), median(oh));
+    // Network view: cluster peers by the block hash they reported at the reference height. A
+    // differing hash at the same height is a different chain — identity, not inference. This is
+    // exactly the data the /chains page renders, so the two views can no longer disagree.
+    let mut counts: BTreeMap<&str, u32> = BTreeMap::new();
+    for n in peers.iter().filter(|n| n.handshaked && !n.chain_hash.is_empty()) {
+        *counts.entry(n.chain_hash.as_str()).or_insert(0) += 1;
+    }
+    let responded: u32 = counts.values().sum();
+    let distinct_chains = counts.len() as u32;
+    let mut sizes: Vec<u32> = counts.values().copied().collect();
+    sizes.sort_unstable_by(|a, b| b.cmp(a));
+    let largest_chain = sizes.first().copied().unwrap_or(0);
+    let second_chain = sizes.get(1).copied().unwrap_or(0);
 
-    // Peer corroboration needs both groups to be populated enough to have a meaningful median.
-    let peer_gap = if ready_peers >= 20 && other_peers >= 20 {
-        (ready_median_height - other_median_height).abs()
-    } else {
-        0
-    };
-
-    let split = rejected_branches > 0
-        || longest_fork >= MIN_FORK_LEN
-        || peer_gap >= MIN_MEDIAN_GAP;
+    // A network split = a second chain with real support; a local split = our node rejecting a
+    // recent branch. Nothing else trips the alarm.
+    let split = rejected_branches > 0 || second_chain >= MIN_SPLIT_CLUSTER;
 
     ChainSplit {
         split,
@@ -358,10 +355,10 @@ pub fn assess_chain_split(tips: &[crate::rpc::ChainTip], peers: &[&NodeInfo]) ->
         forks,
         longest_fork,
         rejected_branches,
-        ready_median_height,
-        other_median_height,
-        ready_peers,
-        other_peers,
+        responded,
+        distinct_chains,
+        largest_chain,
+        second_chain,
     }
 }
 
@@ -372,69 +369,84 @@ mod tests {
     fn tip(height: i64, branchlen: i64, status: &str) -> crate::rpc::ChainTip {
         crate::rpc::ChainTip { height, hash: String::new(), branchlen, status: status.into() }
     }
-    fn peer(ready: bool, height: i32) -> NodeInfo {
+    fn peer_on(hash: &str) -> NodeInfo {
         NodeInfo {
             addr: "1.2.3.4:8333".into(), depth: 1, protocol_version: 70016,
-            user_agent: String::new(), services: 0, start_height: height,
-            chain_hash: String::new(), handshaked: true,
-            implementation: "Bitcoin Knots".into(), version: String::new(),
-            bip110: if ready { Bip110Stance::Enforcing } else { Bip110Stance::NotEnforcing },
+            user_agent: String::new(), services: 0, start_height: 963_340,
+            chain_hash: hash.into(), handshaked: true,
+            implementation: "Bitcoin Core".into(), version: String::new(),
+            bip110: Bip110Stance::NotEnforcing,
             first_seen: String::new(), last_seen: String::new(), times_seen: 0, online: true,
         }
     }
-
-    #[test]
-    fn ordinary_orphans_do_not_read_as_a_split() {
-        // A 1-block valid-fork is a routine orphan race, not a consensus disagreement.
-        let tips = vec![tip(963_346, 0, "active"), tip(963_345, 1, "valid-fork")];
-        let s = assess_chain_split(&tips, &[]);
-        assert!(!s.split, "a 1-block orphan must not be reported as a split");
-        assert_eq!(s.active_height, 963_346);
-        assert_eq!(s.longest_fork, 1);
+    fn peers_on(hash: &str, n: usize) -> Vec<NodeInfo> {
+        (0..n).map(|_| peer_on(hash)).collect()
     }
 
     #[test]
-    fn a_rejected_branch_is_the_split_signature() {
-        // Our node marking a branch INVALID means a rule disagreement — flag it immediately.
-        let tips = vec![tip(963_346, 0, "active"), tip(963_350, 2, "invalid")];
+    fn one_chain_across_all_peers_is_not_a_split() {
+        let tips = vec![tip(963_346, 0, "active"), tip(963_345, 1, "valid-fork")];
+        let peers = peers_on("aaaa", 5000);
+        let refs: Vec<&NodeInfo> = peers.iter().collect();
+        let s = assess_chain_split(&tips, &refs);
+        assert!(!s.split, "everyone on one hash is not a split");
+        assert_eq!(s.distinct_chains, 1);
+        assert_eq!(s.responded, 5000);
+    }
+
+    #[test]
+    fn a_historical_orphan_or_headers_only_branch_is_not_a_split() {
+        // The exact false positive reported: getchaintips carries old valid-fork / headers-only
+        // branches many blocks long. None of these must trip the alarm.
+        let tips = vec![
+            tip(963_346, 0, "active"),
+            tip(900_000, 40, "valid-fork"),     // ancient orphan
+            tip(963_300, 8, "headers-only"),    // headers we never fetched blocks for
+            tip(963_340, 5, "valid-headers"),
+        ];
+        let peers = peers_on("aaaa", 3000);
+        let refs: Vec<&NodeInfo> = peers.iter().collect();
+        assert!(!assess_chain_split(&tips, &refs).split, "stale/headers-only branches are routine");
+    }
+
+    #[test]
+    fn two_well_supported_chains_are_a_split() {
+        let tips = vec![tip(963_346, 0, "active")];
+        let mut peers = peers_on("aaaa", 3000);
+        peers.extend(peers_on("bbbb", 1500)); // a real competing chain
+        let refs: Vec<&NodeInfo> = peers.iter().collect();
+        let s = assess_chain_split(&tips, &refs);
+        assert!(s.split);
+        assert_eq!(s.distinct_chains, 2);
+        assert_eq!(s.largest_chain, 3000);
+        assert_eq!(s.second_chain, 1500);
+    }
+
+    #[test]
+    fn a_few_stray_peers_on_an_odd_hash_are_not_a_split() {
+        // A handful of misconfigured/regtest/buggy peers must not read as a network split.
+        let tips = vec![tip(963_346, 0, "active")];
+        let mut peers = peers_on("aaaa", 3000);
+        peers.extend(peers_on("cccc", 3)); // below MIN_SPLIT_CLUSTER
+        let refs: Vec<&NodeInfo> = peers.iter().collect();
+        assert!(!assess_chain_split(&tips, &refs).split);
+    }
+
+    #[test]
+    fn a_recent_invalid_branch_is_a_split_even_without_peer_data() {
+        // Our node rejecting a branch near the tip is a rule disagreement — a local split
+        // signal that stands even when the header survey is off (no peer hashes).
+        let tips = vec![tip(963_346, 0, "active"), tip(963_350, 3, "invalid")];
         let s = assess_chain_split(&tips, &[]);
-        assert!(s.split, "an invalid branch is a rule disagreement, not a race");
+        assert!(s.split);
         assert_eq!(s.rejected_branches, 1);
     }
 
     #[test]
-    fn a_long_valid_branch_is_a_split() {
-        let tips = vec![tip(963_346, 0, "active"), tip(963_349, MIN_FORK_LEN, "valid-fork")];
-        assert!(assess_chain_split(&tips, &[]).split);
-    }
-
-    #[test]
-    fn peer_height_skew_alone_does_not_trigger_a_split() {
-        let tips = vec![tip(963_346, 0, "active")];
-        // Probe-time skew: an exhaustive crawl spans hours, so heights legitimately spread.
-        let mut peers = Vec::new();
-        for i in 0..40 { peers.push(peer(true, 963_300 + i)); }
-        for i in 0..40 { peers.push(peer(false, 963_310 + i)); }
-        let refs: Vec<&NodeInfo> = peers.iter().collect();
-        let s = assess_chain_split(&tips, &refs);
-        assert!(!s.split, "a small median gap is normal crawl skew, not a split");
-
-        // A gap well beyond that skew, with both groups populated, does corroborate one.
-        let mut wide = Vec::new();
-        for i in 0..40 { wide.push(peer(true, 963_300 + i)); }
-        for i in 0..40 { wide.push(peer(false, 963_300 + MIN_MEDIAN_GAP as i32 * 2 + i)); }
-        let refs: Vec<&NodeInfo> = wide.iter().collect();
-        assert!(assess_chain_split(&tips, &refs).split);
-    }
-
-    #[test]
-    fn peer_corroboration_needs_both_groups_populated() {
-        // With only a handful of ready peers the median is noise — don't cry split on it.
-        let tips = vec![tip(963_346, 0, "active")];
-        let mut peers = vec![peer(true, 900_000)];           // one lone, far-behind ready node
-        for i in 0..40 { peers.push(peer(false, 963_300 + i)); }
-        let refs: Vec<&NodeInfo> = peers.iter().collect();
-        assert!(!assess_chain_split(&tips, &refs).split);
+    fn an_ancient_invalid_tip_is_not_a_current_split() {
+        // getchaintips keeps known-invalid tips forever; one from long ago is history.
+        let tips = vec![tip(963_346, 0, "active"), tip(800_000, 2, "invalid")];
+        assert!(!assess_chain_split(&tips, &[]).split, "an old invalid tip is not a live fork");
     }
 
     fn stance(ua: &str) -> Bip110Stance {

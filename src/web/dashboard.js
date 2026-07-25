@@ -693,31 +693,31 @@ function renderChainSplit(){
   wrap.classList.toggle("is-split", !!cs.split);
 
   if (!cs.split){
-    setLabel(".tk-lab-one", "one chain · height " + n(cs.active_height));
-    const forkNote = cs.longest_fork > 0
-      ? ` Longest known side branch is ${n(cs.longest_fork)} block(s) — normal orphan churn.`
+    const agreeNote = cs.responded
+      ? ` <b>${n(cs.responded)}</b> peers surveyed all report the same block.`
       : "";
+    setLabel(".tk-lab-one", "one chain · height " + n(cs.active_height));
     status.innerHTML = `<span class="ok">No split detected.</span> Your node reports a single active `
-      + `chain at height <b>${n(cs.active_height)}</b>, with no rejected branches.${forkNote}`;
+      + `chain at height <b>${n(cs.active_height)}</b>, with no rejected branches.${agreeNote}`
+      + ` <a href="/chains">Chain view →</a>`;
     return;
   }
 
-  // Split: name each track by what it represents, with the evidence spelled out.
-  setLabel(".tk-lab-up",   "BIP-110 enforcing · " + (cs.ready_median_height ? "height " + n(cs.ready_median_height) : "your node"));
-  setLabel(".tk-lab-down", "not enforcing · " + (cs.other_median_height ? "height " + n(cs.other_median_height) : "rest of network"));
+  // Split. Evidence is stated from whichever signal(s) actually fired — the peer-hash survey,
+  // our node's own rejection, or both — so the message never claims more than was measured.
+  setLabel(".tk-lab-up",   "your node · height " + n(cs.active_height));
+  setLabel(".tk-lab-down", cs.second_chain
+    ? n(cs.second_chain) + " peers on another block"
+    : "competing chain");
   const ev = [];
+  if (cs.second_chain >= 1 && cs.distinct_chains > 1)
+    ev.push(`peers report <b>${n(cs.distinct_chains)}</b> different blocks at the reference height `
+      + `(<b>${n(cs.largest_chain)}</b> vs <b>${n(cs.second_chain)}</b> nodes)`);
   if (cs.rejected_branches > 0)
-    ev.push(`your node has <b>rejected ${n(cs.rejected_branches)} branch(es)</b> as invalid`);
-  if (cs.longest_fork > 0)
-    ev.push(`the longest competing branch is <b>${n(cs.longest_fork)} blocks</b>`);
-  if (cs.ready_peers >= 20 && cs.other_peers >= 20){
-    const gap = Math.abs(cs.ready_median_height - cs.other_median_height);
-    if (gap > 0) ev.push(`BIP-110-ready peers sit <b>${n(gap)} blocks</b> from the rest `
-      + `(${n(cs.ready_peers)} vs ${n(cs.other_peers)} nodes)`);
-  }
+    ev.push(`your node has <b>rejected ${n(cs.rejected_branches)} recent branch(es)</b> as invalid`);
   status.innerHTML = `<span class="bad">⚠ Chain split suspected.</span> `
     + (ev.length ? ev.join("; ") + "." : "")
-    + ` Your node's active chain is at height <b>${n(cs.active_height)}</b>.`;
+    + ` <a href="/chains">See the chain view →</a>`;
 }
 
 // ---- assemble everything, then live-poll data.json when running under --watch ----

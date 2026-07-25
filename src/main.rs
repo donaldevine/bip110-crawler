@@ -591,10 +591,10 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
                                     let split = node::assess_chain_split(&tips, &peers);
                                     if split.split {
                                         eprintln!(
-                                            "[split] CHAIN SPLIT SUSPECTED: active={} longest_fork={} rejected={} ready_median={} other_median={}",
-                                            split.active_height, split.longest_fork,
-                                            split.rejected_branches, split.ready_median_height,
-                                            split.other_median_height
+                                            "[split] CHAIN SPLIT SUSPECTED: active={} rejected_recent={} peer_chains={} ({} vs {} nodes of {} surveyed)",
+                                            split.active_height, split.rejected_branches,
+                                            split.distinct_chains, split.largest_chain,
+                                            split.second_chain, split.responded
                                         );
                                     }
                                     match db::open(dbpath) {

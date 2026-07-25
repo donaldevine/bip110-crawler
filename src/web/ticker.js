@@ -10,6 +10,11 @@
 (function(){
   // Every identifier is prefixed/scoped to avoid colliding with a page's own globals.
   const TICK_POLL_MS = 8000;
+  // Scroll speed in px/sec. The duration is derived from the measured content width so the
+  // strip always moves at this rate, however much (or little) it is carrying.
+  const TICK_PX_PER_SEC = 55;
+  // Last markup written to the strip, so an unchanged poll doesn't restart the animation.
+  let lastHtml = "";
   const el = document.createElement("div");
   // Starts in the loading state: amber dot, "connecting…", and a placeholder in the marquee so
   // the strip is never blank while the first fetch is in flight. Note it deliberately does NOT
@@ -29,12 +34,6 @@
 
   const fmt = n => Number(n || 0).toLocaleString();
   const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  const ago = ts => {
-    const s = Math.max(0, Math.floor(Date.now()/1000) - ts);
-    if (s < 60) return s + "s ago";
-    if (s < 3600) return Math.floor(s/60) + "m ago";
-    return Math.floor(s/3600) + "h ago";
-  };
 
   // Remembered across polls so we can tell a genuine change from a re-render.
   let lastHeight = null, lastReachable = null, flash = [];
@@ -63,10 +62,11 @@
 
     if (d.tip){
       const t = d.tip;
+      // Deliberately no "N minutes ago" here: any per-minute value changes the strip's markup,
+      // which restarts the scroll. Freshness lives in the pinned block, which never animates.
       parts.push(item(`⛓ block <b>${fmt(t.height)}</b> · ${fmt(t.tx_count)} txs`
         + (t.miner ? ` · ${esc(t.miner)}` : "")
-        + ` · ${t.signals ? '<b class="tk-ok">✓ signalling</b>' : '<b class="tk-bad">☣ not signalling</b>'}`
-        + ` · ${ago(t.time)}`));
+        + ` · ${t.signals ? '<b class="tk-ok">✓ signalling</b>' : '<b class="tk-bad">☣ not signalling</b>'}`));
     }
 
     parts.push(item(`<b>${fmt(d.reachable)}</b> reachable nodes`));
@@ -84,8 +84,34 @@
 
     // Duplicated once so the marquee can loop seamlessly: the animation translates by -50%,
     // which lands exactly on the start of the second copy.
-    const run = parts.join("");
-    document.getElementById("tk-run").innerHTML = run + run;
+    const html = parts.join("").repeat(2);
+    const run = document.getElementById("tk-run");
+    if (!run) return;
+    // CRITICAL: writing innerHTML restarts the CSS animation from zero. Polling every 8s with
+    // a ~30s cycle would therefore snap the strip back to the start before it ever travelled —
+    // it looks like a twitch rather than a scroll. Only touch the DOM when the content really
+    // changed, so the animation runs uninterrupted across polls.
+    if (html === lastHtml) return;
+    lastHtml = html;
+
+    // When the content genuinely changes we must rewrite, which restarts the animation at zero
+    // — a visible snap back to the start. Capture how far through the cycle we were, then
+    // resume there with a negative animation-delay so the strip carries on instead of jumping.
+    let elapsed = 0;
+    if (run.getAnimations){
+      const a = run.getAnimations()[0];
+      if (a && typeof a.currentTime === "number") elapsed = a.currentTime / 1000;
+    }
+
+    run.innerHTML = html;
+    // Drive the duration from the measured width so the speed is constant no matter how many
+    // items there are; a fixed duration makes a long strip race and a short one crawl.
+    const oneCopy = run.scrollWidth / 2;
+    if (oneCopy > 0){
+      const dur = Math.max(12, Math.round(oneCopy / TICK_PX_PER_SEC));
+      run.style.animationDuration = dur + "s";
+      run.style.animationDelay = elapsed > 0 ? `-${(elapsed % dur).toFixed(2)}s` : "0s";
+    }
   }
 
   async function poll(){
@@ -100,6 +126,7 @@
       if (st){ st.className = "tk-dim"; st.textContent = "crawler unreachable"; }
       const run = document.getElementById("tk-run");
       if (run) run.innerHTML = item('<span class="tk-dim">retrying…</span>');
+      lastHtml = "";   // force a full re-render once the crawler comes back
       return;
     }
     // Detect real changes since the previous poll and surface them as their own items.

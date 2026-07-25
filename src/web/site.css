@@ -193,10 +193,18 @@ section .hint { color:var(--muted); font-size:12.5px; margin:0 0 16px; }
 /* flex:none is essential. As a flex item .tk-run would otherwise be shrunk to the container's
    width, and the keyframe below translates by -50% *of the element* — so it would creep by half
    a viewport instead of exactly one copy of the content, and barely appear to move at all. */
-.tk-run { flex:none; display:inline-flex; white-space:nowrap; will-change:transform;
+/* translate3d (not translateX) and backface-visibility force this onto its own compositor
+   layer. That matters a lot: the dashboard repaints a 3,000-node canvas every animation frame,
+   so a main-thread animation here would stutter against it. On the compositor it is immune to
+   whatever the page's own rAF loops are doing. */
+.tk-run { flex:none; display:inline-flex; white-space:nowrap;
+  will-change:transform; backface-visibility:hidden;
   animation:tk-scroll 45s linear infinite; }
 .tk-scroll:hover .tk-run { animation-play-state:paused; }  /* let people actually read it */
-@keyframes tk-scroll { from { transform:translateX(0); } to { transform:translateX(-50%); } }
+@keyframes tk-scroll {
+  from { transform:translate3d(0,0,0); }
+  to   { transform:translate3d(-50%,0,0); }
+}
 .tk-item { flex:none; font-family:var(--mono); font-size:12px; color:var(--ink-2);
   padding:0 22px; border-right:1px solid var(--grid); }
 .tk-item b { color:var(--ink); }
@@ -213,13 +221,16 @@ body { padding-top:32px; }
   animation:none; }
 .tk-wait { color:var(--warn); }
 
-/* Reduced motion: do NOT simply freeze the marquee — that leaves most items permanently
-   clipped out of view, which is worse than the motion. Stop the animation and let the strip
-   be scrolled by hand instead, so all the content stays reachable. */
+/* Reduced motion: do NOT simply freeze the marquee — that leaves most items permanently clipped
+   out of view, which is worse than the motion it avoids. Stop the animation, let the strip be
+   scrolled by hand, and fade the right edge so it's visibly obvious there is more to see.
+   Without that cue the content is reachable but undiscoverable. */
 @media (prefers-reduced-motion: reduce) {
   .tk-run { animation:none; }
   .tk-live { animation:none; }
-  .tk-scroll { overflow-x:auto; scrollbar-width:none; }
+  .tk-scroll { overflow-x:auto; scrollbar-width:none;
+    -webkit-mask-image:linear-gradient(90deg, #000 88%, transparent 100%);
+            mask-image:linear-gradient(90deg, #000 88%, transparent 100%); }
   .tk-scroll::-webkit-scrollbar { display:none; }
 }
 

@@ -117,6 +117,13 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     prune_days: u64,
 
+    /// One-off DB maintenance: re-derive every stored block's miner/pool tag from its coinbase
+    /// with the current parser, and overwrite whatever changed, then exit. Run after a
+    /// miner-tag parsing fix so blocks already in --db pick it up too, not just new ones.
+    /// Requires --db and --rpc-*.
+    #[arg(long)]
+    backfill_miners: bool,
+
     /// Port for --serve.
     #[arg(long, default_value_t = 8080)]
     port: u16,
@@ -213,6 +220,16 @@ fn main() -> Result<()> {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("--prune-db requires --db <path>"))?;
         return db::prune_and_vacuum(&db_path, args.prune_days);
+    }
+
+    if args.backfill_miners {
+        let db_path = args
+            .db
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--backfill-miners requires --db <path>"))?;
+        let rpc = build_rpc(&args)?
+            .ok_or_else(|| anyhow::anyhow!("--backfill-miners requires --rpc-url (+ --rpc-user/--rpc-pass or --rpc-cookie)"))?;
+        return db::backfill_miners(&db_path, &rpc, args.signal_bit);
     }
 
     // Server mode: serve the API/page from the DB instead of crawling.

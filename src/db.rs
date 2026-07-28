@@ -147,6 +147,44 @@ pub fn prune_and_vacuum(path: &Path, keep_days: u64) -> Result<()> {
     Ok(())
 }
 
+/// One-off maintenance: re-derive every stored block's `miner` tag from its coinbase using the
+/// current parser, and write back whatever changed. Lets a parser fix (e.g. picking up the
+/// separate miner sub-tag Ocean's DATUM software adds alongside its own pool tag) apply
+/// retroactively to blocks already in the DB, not just newly-crawled ones. Only `--db` holds
+/// a rolling window of recent blocks (one difficulty period or so), so this is cheap — a
+/// couple of RPC calls per block, not a full-chain rescan.
+pub fn backfill_miners(path: &Path, rpc: &crate::rpc::RpcClient, bit: u8) -> Result<()> {
+    let mut conn = open(path)?;
+    let rows: Vec<(i64, String)> = {
+        let mut st = conn.prepare("SELECT height, miner FROM blocks ORDER BY height")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let old_miner: BTreeMap<i64, String> = rows.iter().cloned().collect();
+    let heights: Vec<i64> = rows.into_iter().map(|(h, _)| h).collect();
+
+    eprintln!("[backfill-miners] re-deriving miner tags for {} block(s)…", heights.len());
+    let mut changed = 0usize;
+    let mut done = 0usize;
+    const CHUNK: usize = 200;
+    for chunk in heights.chunks(CHUNK) {
+        let fresh = rpc.blocks_at_heights(chunk, bit)?;
+        for b in &fresh {
+            if old_miner.get(&b.height).map(String::as_str) != Some(b.miner.as_str()) {
+                changed += 1;
+            }
+        }
+        write_blocks(&mut conn, &fresh)?;
+        done += chunk.len();
+        eprintln!("[backfill-miners] {done}/{}", heights.len());
+    }
+    eprintln!(
+        "[backfill-miners] done: {changed} of {} block(s) got a new miner tag.",
+        heights.len()
+    );
+    Ok(())
+}
+
 /// Window used when recording history points: a node counts toward an hour's population
 /// if it was confirmed reachable within this long of that hour. Matches the serve-side
 /// `--max-age-hours` default so the graph lines up with what the site showed.

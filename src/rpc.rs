@@ -525,41 +525,94 @@ impl RpcClient {
     }
 }
 
-/// Pull a display-ready pool name out of a coinbase scriptSig (hex).
+/// Pull a display-ready `pool` or `pool · miner` tag out of a coinbase scriptSig (hex).
 ///
-/// Two steps. First keep the longest printable-ASCII run, which is where the pool tag lives
-/// amongst the height push, extranonce and witness commitment. Then unwrap it: tags are
-/// conventionally slash-delimited (`/Foundry USA Pool #dropgold/`, `/ViaBTC/Mined by bob/`),
-/// so the raw run carries delimiters that shouldn't reach the UI.
+/// First collect every printable-ASCII run in the scriptSig — the pool tag lives amongst the
+/// height push, extranonce and witness commitment, which is noise around it, not part of it.
+/// The pool name comes from the longest such run: that noise is almost always shorter than a
+/// deliberate tag. The run is then unwrapped, since tags are conventionally slash-delimited
+/// (`/Foundry USA Pool #dropgold/`) — and the pool name is the first *substantial* segment
+/// there (>= 3 chars), not simply the first non-empty one: a stray printable byte from the
+/// extranonce often lands right against the tag with no delimiter of its own (`k/Foundry USA
+/// Pool #dropgold/`), which would otherwise be mistaken for the whole pool name.
 ///
-/// The pool name is the FIRST non-empty segment, not the longest — `/ViaBTC/Mined by bob/`
-/// identifies the pool as ViaBTC, and the longer trailing segment is an individual miner's
-/// own tag.
+/// An individual miner's own tag, appended after the pool name when present, is real for
+/// exactly one pool we've seen: Ocean's DATUM software lets each miner set their own identity,
+/// surfaced as either a later slash segment or (Ocean's actual convention) a wholly separate
+/// ASCII run elsewhere in the scriptSig (its own tag is stored as `< OCEAN.XYZ >`, alongside a
+/// lone `Roughnecks`- or `Peak Mining`-style run). Other pools' extra segments/runs are just
+/// extranonce noise that happens to be printable — appending those as if they were a deliberate
+/// tag was tried and confirmed (against this project's own crawled blocks) to mostly produce
+/// garbage, so the lookup is scoped to Ocean rather than attempted for every pool.
 fn parse_coinbase_tag(sig_hex: &str) -> String {
     let bytes: Vec<u8> = (0..sig_hex.len() / 2)
         .filter_map(|i| u8::from_str_radix(&sig_hex[i * 2..i * 2 + 2], 16).ok())
         .collect();
-    let mut best = String::new();
+
+    // Every printable-ASCII run, in the order each appears in the scriptSig.
+    let mut runs: Vec<String> = Vec::new();
     let mut cur = String::new();
     for b in bytes {
         if (0x20..0x7f).contains(&b) {
             cur.push(b as char);
-        } else {
-            if cur.len() > best.len() {
-                best = cur.clone();
-            }
-            cur.clear();
+        } else if !cur.is_empty() {
+            runs.push(std::mem::take(&mut cur));
         }
     }
-    if cur.len() > best.len() {
-        best = cur;
+    if !cur.is_empty() {
+        runs.push(cur);
     }
-    let name = best
-        .split('/')
-        .map(str::trim)
-        .find(|s| !s.is_empty())
-        .unwrap_or_else(|| best.trim());
-    name.chars().take(32).collect()
+    if runs.is_empty() {
+        return String::new();
+    }
+
+    let mut best_idx = 0;
+    for (i, r) in runs.iter().enumerate() {
+        if r.len() > runs[best_idx].len() {
+            best_idx = i;
+        }
+    }
+    let best = &runs[best_idx];
+
+    let segments: Vec<&str> = best.split('/').map(clean_tag).filter(|s| !s.is_empty()).collect();
+    let pool_pos = segments.iter().position(|s| s.len() >= 3).unwrap_or(0);
+    let pool: String = segments
+        .get(pool_pos)
+        .copied()
+        .unwrap_or_else(|| clean_tag(best))
+        .chars()
+        .take(32)
+        .collect();
+
+    let miner = if pool.eq_ignore_ascii_case("OCEAN.XYZ") || pool.eq_ignore_ascii_case("OCEAN") {
+        segments
+            .get(pool_pos.saturating_add(1)..)
+            .and_then(|rest| rest.iter().find(|s| s.len() >= 4))
+            .map(|s| s.to_string())
+            .or_else(|| {
+                runs.iter()
+                    .enumerate()
+                    .filter(|(i, r)| *i != best_idx && clean_tag(r).len() >= 4)
+                    .map(|(_, r)| clean_tag(r).to_string())
+                    .next()
+            })
+    } else {
+        None
+    };
+
+    match miner {
+        Some(m) if !m.is_empty() && !m.eq_ignore_ascii_case(&pool) => {
+            let m: String = m.chars().take(32).collect();
+            format!("{pool} · {m}")
+        }
+        _ => pool,
+    }
+}
+
+/// Trim whitespace and the decorative wrapper punctuation some pools pad their tag with
+/// (Ocean's is stored as `< OCEAN.XYZ >`), without touching punctuation inside the tag itself.
+fn clean_tag(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_whitespace() || c == '<' || c == '>')
 }
 
 #[cfg(test)]
@@ -586,8 +639,9 @@ mod tests {
         // Long tags are still capped, but the cap now clears the real pool names.
         assert_eq!(t(&format!("/{}/", "x".repeat(50))), "x".repeat(32));
         assert_eq!(t("/slush/"), "slush");
-        // Multi-segment: the POOL leads. The longer trailing segment is an individual
-        // miner's own tag, so picking the longest segment would name the wrong party.
+        // Multi-segment tags are only enriched with a miner sub-tag for Ocean (see the test
+        // below) — for every other pool the trailing segment is real-world extranonce noise
+        // more often than a deliberate tag, so it's dropped just like before.
         assert_eq!(t("/ViaBTC/Mined by someminer123/"), "ViaBTC");
         assert_eq!(t("/F2Pool/Mined by user/"), "F2Pool");
         // Unwrapped and unslashed tags must survive untouched.
@@ -596,6 +650,48 @@ mod tests {
         // Nothing legible in the scriptSig at all.
         assert_eq!(parse_coinbase_tag("03a1b2c300ff"), "");
         assert_eq!(parse_coinbase_tag(""), "");
+    }
+
+    #[test]
+    fn a_stray_leading_byte_glued_onto_the_tag_is_not_mistaken_for_the_pool_name() {
+        // Real Foundry blocks often have a lone printable extranonce byte land directly
+        // against the leading `/`, with no non-printable byte separating them, e.g. this
+        // block's actual scriptSig ASCII run: "k/Foundry USA Pool #dropgold/`R". Naively
+        // taking the first non-empty `/`-segment would name the pool "k".
+        let hex = coinbase_hex("k/Foundry USA Pool #dropgold/`R");
+        assert_eq!(parse_coinbase_tag(&hex), "Foundry USA Pool #dropgold");
+    }
+
+    #[test]
+    fn coinbase_tag_picks_up_a_separate_run_as_the_miner_tag_for_ocean_only() {
+        // Ocean's DATUM software writes the pool's own tag and the individual miner's tag as
+        // two distinct ASCII runs with no shared `/` delimiter — unlike the wrapped-segment
+        // convention above — and pads its own tag (`< OCEAN.XYZ >`) wide enough that it, not
+        // the miner's name, is still the longest run and so is picked as the pool.
+        let two_runs = |pool: &str, miner: &str| {
+            let mut hex = String::from("03a1b2c300");
+            for b in pool.bytes() {
+                hex.push_str(&format!("{b:02x}"));
+            }
+            hex.push_str("00");
+            for b in miner.bytes() {
+                hex.push_str(&format!("{b:02x}"));
+            }
+            hex.push_str("00deadbeef");
+            hex
+        };
+
+        assert_eq!(
+            parse_coinbase_tag(&two_runs("< OCEAN.XYZ >", "Roughnecks")),
+            "OCEAN.XYZ · Roughnecks"
+        );
+        // Same layout for a pool this project has no special knowledge of: the second run is
+        // left alone rather than guessed at, because for every other pool we've actually seen
+        // crawled, that second run turns out to be extranonce noise, not a deliberate tag.
+        assert_eq!(
+            parse_coinbase_tag(&two_runs("< SomeOtherPool >", "Roughnecks")),
+            "SomeOtherPool"
+        );
     }
 
     /// Build a fake `getblock` verbosity-2 response so the classifier can be exercised

@@ -279,7 +279,10 @@ function renderGrid(){
           + (p.bip110_reject_count
               ? `<span class="tox">BIP-110 would reject ${fmt(p.bip110_reject_count)} tx `
                 + `(${pctWeight(p.bip110_reject_weight).toFixed(1)}% weight)</span>`
-              : `<span class="okc">nothing BIP-110 would reject</span>`);
+              // A signalling block is already voting for BIP-110, so "nothing would reject"
+              // is a given, not news — only worth a line when signalling blocks and
+              // non-signalling ones would say something different.
+              : (b.signals ? "" : `<span class="okc">nothing BIP-110 would reject</span>`));
       } else {
         payloadLines = `<hr class="tiphr"><span class="dim">payload scan pending…</span>`;
       }
@@ -323,7 +326,7 @@ function renderTable(){
     const rejectCell = p
       ? (p.bip110_reject_count
           ? `<span class="bad-text">${fmt(p.bip110_reject_count)} · ${pctWeight(p.bip110_reject_weight).toFixed(1)}%</span>`
-          : `<span class="ok-text">none</span>`)
+          : (b.signals ? `<span class="dim">n/a</span>` : `<span class="ok-text">none</span>`))
       : `<span class="dim">—</span>`;
     const s = b.stats;
     const feeCell  = s ? `<span title="${esc(satsShort(s.total_fee))}">${esc(btc(s.total_fee))}</span>` : `<span class="dim">—</span>`;

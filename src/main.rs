@@ -106,6 +106,17 @@ struct Args {
     #[arg(long)]
     serve: bool,
 
+    /// One-off DB maintenance: delete long-dead nodes + their orphaned edges, then VACUUM to
+    /// reclaim space, and exit. Keeps the own node and everything confirmed reachable within
+    /// --prune-days. STOP the crawlers first (VACUUM needs an exclusive lock). Requires --db.
+    #[arg(long)]
+    prune_db: bool,
+
+    /// Retention window for --prune-db, in days. Nodes not confirmed reachable within this are
+    /// deleted. Kept well above the serve freshness window so nothing currently shown is lost.
+    #[arg(long, default_value_t = 30)]
+    prune_days: u64,
+
     /// Port for --serve.
     #[arg(long, default_value_t = 8080)]
     port: u16,
@@ -194,6 +205,15 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // One-off DB maintenance, then exit.
+    if args.prune_db {
+        let db_path = args
+            .db
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--prune-db requires --db <path>"))?;
+        return db::prune_and_vacuum(&db_path, args.prune_days);
+    }
 
     // Server mode: serve the API/page from the DB instead of crawling.
     if args.serve {

@@ -40,7 +40,16 @@ CREATE TABLE IF NOT EXISTS blocks (
   signals INTEGER, tx_count INTEGER, size INTEGER, weight INTEGER, miner TEXT,
   payload TEXT, stats TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_nodes_online ON nodes(online);
+-- The hot predicate is `online=1 AND last_seen >= cutoff` (fresh_clause) — used by nearly
+-- every read (report, ticker, stats, reseed). A composite on (online, last_seen) lets SQLite
+-- satisfy both from the index instead of scanning the whole (800k+ row) table. Its leftmost
+-- prefix also serves the plain `online=1` counts, so a separate single-column index is redundant.
+CREATE INDEX IF NOT EXISTS idx_nodes_fresh ON nodes(online, last_seen);
+-- The ticker's new-peer counts filter on first_seen every few seconds. first_seen is written
+-- once and never changes, so this index is essentially free to maintain.
+CREATE INDEX IF NOT EXISTS idx_nodes_first_seen ON nodes(first_seen);
+-- Reseed picks the most-recently-confirmed handshaked peers; this serves its filter + ORDER BY.
+CREATE INDEX IF NOT EXISTS idx_nodes_reseed ON nodes(online, handshaked, last_seen);
 CREATE INDEX IF NOT EXISTS idx_nodes_impl ON nodes(implementation);
 CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_addr);
 -- Nodes can't duplicate (addr is the PRIMARY KEY); this keeps edges unique too.
@@ -56,7 +65,86 @@ pub fn open(path: &Path) -> Result<Connection> {
     // bring older DBs up to date. Erroring means the column is already there.
     let _ = conn.execute("ALTER TABLE blocks ADD COLUMN payload TEXT", []);
     let _ = conn.execute("ALTER TABLE blocks ADD COLUMN stats TEXT", []);
+    // The old single-column online index is fully covered by idx_nodes_fresh's leftmost prefix;
+    // drop it so writes don't maintain a redundant b-tree. (No-op on a fresh DB.)
+    let _ = conn.execute("DROP INDEX IF EXISTS idx_nodes_online", []);
     Ok(conn)
+}
+
+/// One-off maintenance: delete long-dead nodes and their orphaned edges, then reclaim the freed
+/// space. **Stop the crawlers before running this** — VACUUM needs an exclusive lock and will
+/// refuse (harmlessly) if another process is writing.
+///
+/// Safety model:
+///  * A node is KEPT if it is the own node (`depth = 0`) or was confirmed reachable within
+///    `keep_days`. Everything else — addresses that never answered, or went away long ago — is
+///    deleted. `keep_days` should exceed the serve freshness window, so nothing the site can
+///    currently show is ever touched (the default 30 > the 14-day window).
+///  * The node delete and edge cleanup run in ONE transaction: it either fully applies or not
+///    at all, so an interruption can't leave a half-pruned DB.
+///  * VACUUM runs afterwards, outside the transaction, and is itself atomic.
+///
+/// Refuses to run with `keep_days == 0` (that would delete the whole network).
+pub fn prune_and_vacuum(path: &Path, keep_days: u64) -> Result<()> {
+    if keep_days == 0 {
+        anyhow::bail!("refusing to prune with keep_days=0 (that would delete every node)");
+    }
+    let mut conn = open(path)?;
+    conn.execute_batch("PRAGMA busy_timeout=30000;").ok();
+    let cutoff = crate::time::iso_secs_ago(keep_days * 86_400);
+
+    let count = |c: &Connection, sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+    let nodes_before = count(&conn, "SELECT COUNT(*) FROM nodes");
+    let edges_before = count(&conn, "SELECT COUNT(*) FROM edges");
+    let page_size = count(&conn, "PRAGMA page_size");
+    let size_before = count(&conn, "PRAGMA page_count") * page_size;
+
+    // How many nodes the keep-rule will remove — reported before we touch anything.
+    let will_delete: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM nodes WHERE depth <> 0 AND (last_seen = '' OR last_seen < ?1)",
+        params![cutoff],
+        |r| r.get(0),
+    )?;
+    eprintln!(
+        "[prune] {nodes_before} nodes, {edges_before} edges, {:.0} MB. Deleting {will_delete} nodes \
+         not confirmed reachable since {cutoff} (keeping the own node + everything within {keep_days}d).",
+        size_before as f64 / 1_048_576.0
+    );
+
+    let deleted_nodes;
+    let deleted_edges;
+    {
+        let tx = conn.transaction()?;
+        deleted_nodes = tx.execute(
+            "DELETE FROM nodes WHERE depth <> 0 AND (last_seen = '' OR last_seen < ?1)",
+            params![cutoff],
+        )?;
+        // Edges pointing at a node that no longer exists are dead weight — the network map only
+        // ever draws live nodes, so an edge to a pruned address can never be rendered.
+        deleted_edges = tx.execute(
+            "DELETE FROM edges
+             WHERE from_addr NOT IN (SELECT addr FROM nodes)
+                OR to_addr   NOT IN (SELECT addr FROM nodes)",
+            [],
+        )?;
+        tx.commit()?;
+    }
+    eprintln!("[prune] deleted {deleted_nodes} nodes and {deleted_edges} orphaned edges; vacuuming…");
+
+    // VACUUM rewrites the file to reclaim the freed pages; ANALYZE refreshes planner stats for
+    // the new, much smaller tables. Both must be outside a transaction.
+    conn.execute("VACUUM", [])?;
+    conn.execute("ANALYZE", [])?;
+
+    let nodes_after = count(&conn, "SELECT COUNT(*) FROM nodes");
+    let edges_after = count(&conn, "SELECT COUNT(*) FROM edges");
+    let size_after = count(&conn, "PRAGMA page_count") * count(&conn, "PRAGMA page_size");
+    eprintln!(
+        "[prune] done: {nodes_after} nodes, {edges_after} edges, {:.0} MB (was {:.0} MB).",
+        size_after as f64 / 1_048_576.0,
+        size_before as f64 / 1_048_576.0
+    );
+    Ok(())
 }
 
 /// Window used when recording history points: a node counts toward an hour's population
@@ -378,15 +466,25 @@ pub fn read_report(conn: &Connection, max: usize, max_age_secs: u64) -> Result<R
     }
 
     // Edges among the shown nodes only.
+    //
+    // CRITICAL: pull these through the from_addr index, one shown node at a time — do NOT
+    // `SELECT … FROM edges` and filter in Rust. The edges table reaches into the millions on a
+    // full crawl, so a whole-table scan on every /api/report (polled every ~10s) reads and
+    // allocates millions of rows just to discard ~all of them. Here each lookup is an indexed
+    // range over one node's out-edges (capped at edges_per_node during the crawl), so the total
+    // read is bounded by the shown set, not the whole graph. (from_addr,to_addr) is a covering
+    // index, so this never touches the table itself.
     let shown: std::collections::HashSet<&str> = nodes.iter().map(|n| n.addr.as_str()).collect();
     let mut edges = Vec::new();
     {
-        let mut st = conn.prepare("SELECT from_addr, to_addr FROM edges")?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        for row in rows {
-            let (from, to) = row?;
-            if shown.contains(from.as_str()) && shown.contains(to.as_str()) {
-                edges.push(Edge { from, to });
+        let mut st = conn.prepare("SELECT to_addr FROM edges WHERE from_addr = ?1")?;
+        for n in &nodes {
+            let rows = st.query_map(params![n.addr], |r| r.get::<_, String>(0))?;
+            for to in rows {
+                let to = to?;
+                if shown.contains(to.as_str()) {
+                    edges.push(Edge { from: n.addr.clone(), to });
+                }
             }
         }
     }
@@ -911,6 +1009,46 @@ mod tests {
             addr: "self".into(), version: 0, subversion: "x".into(),
             implementation: "Bitcoin Core".into(), network: "main".into(),
         }
+    }
+
+    #[test]
+    fn prune_keeps_own_and_fresh_drops_dead() {
+        use crate::time::{iso_secs_ago, now_iso};
+        let path = std::env::temp_dir().join(format!("bip110_prune_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = open(&path).unwrap();
+            let ins = |addr: &str, depth: i64, last_seen: &str, online: i64| {
+                conn.execute(
+                    "INSERT INTO nodes (addr,depth,protocol_version,user_agent,services,start_height,
+                        handshaked,implementation,version,bip110,first_seen,last_seen,times_seen,online)
+                     VALUES (?1,?2,0,'',0,0,1,'Bitcoin Core','','not_enforcing','',?3,0,?4)",
+                    params![addr, depth, last_seen, online],
+                ).unwrap();
+            };
+            let now = now_iso();
+            ins("self:0", 0, "", 1);                             // own node -> KEEP (depth 0)
+            ins("1.1.1.1:8333", 1, &now, 1);                     // fresh online -> KEEP
+            ins("2.2.2.2:8333", 1, &iso_secs_ago(5 * 86400), 0); // gone 5d ago -> KEEP (< 30d)
+            ins("3.3.3.3:8333", 1, &iso_secs_ago(60 * 86400), 0);// gone 60d ago -> DROP
+            ins("4.4.4.4:8333", 1, "", 0);                       // never seen -> DROP
+            conn.execute("INSERT INTO edges VALUES ('1.1.1.1:8333','2.2.2.2:8333')", []).unwrap();
+            conn.execute("INSERT INTO edges VALUES ('1.1.1.1:8333','3.3.3.3:8333')", []).unwrap();
+        }
+
+        prune_and_vacuum(&path, 30).unwrap();
+
+        let conn = open(&path).unwrap();
+        let kept: Vec<String> = conn
+            .prepare("SELECT addr FROM nodes ORDER BY addr").unwrap()
+            .query_map([], |r| r.get::<_, String>(0)).unwrap()
+            .map(Result::unwrap).collect();
+        assert_eq!(kept, vec!["1.1.1.1:8333", "2.2.2.2:8333", "self:0"],
+            "own node and anything within 30d survive; dead addresses go");
+        let edges: i64 = conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0)).unwrap();
+        assert_eq!(edges, 1, "the edge to a pruned node must be cleaned up");
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

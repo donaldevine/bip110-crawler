@@ -237,6 +237,21 @@ fn handle(
                 })
                 .map(|s| (s, json_header()))
         }
+        // One page of the "all blocks" horizontal scroller. `before` pages backwards through
+        // history (strictly-lower heights); omit it for the newest page. Capped well above
+        // what one screen ever shows at once, but still far short of the whole rolling window.
+        "/api/blocks/page" => {
+            let limit = query.get("limit").and_then(|s| s.parse().ok()).unwrap_or(40).min(200);
+            let before = query.get("before").and_then(|s| s.parse::<i64>().ok());
+            db::read_blocks_page(conn, before, limit)
+                .and_then(|(blocks, has_more)| {
+                    Ok(serde_json::to_string(&serde_json::json!({
+                        "blocks": blocks,
+                        "has_more": has_more,
+                    }))?)
+                })
+                .map(|s| (s, json_header()))
+        }
         // Small payload for the live ticker on every page.
         "/api/ticker" => db::read_ticker(conn, max_age_secs)
             .and_then(|v| Ok(serde_json::to_string(&v)?))

@@ -55,6 +55,17 @@
   </section>
 
   <section>
+    <h2>All blocks</h2>
+    <p class="hint">Every block recorded in the database, newest at the left. Scroll — trackpad,
+      wheel, touch or the scrollbar all work — to browse back through history; older blocks load
+      automatically as you approach the edge. Same colouring as above.</p>
+    <div class="panel">
+      <div class="blockstrip" id="blockstrip"><div class="loading">Loading…</div></div>
+      <div class="tooltip" id="stip"></div>
+    </div>
+  </section>
+
+  <section>
     <h2>BIP-110 signalling this period</h2>
     <p class="hint" id="period-hint">The blocks in the <b>current difficulty period</b> (2016
       blocks, evaluated at the retarget boundary) whose miner set version bit 4 — the ones

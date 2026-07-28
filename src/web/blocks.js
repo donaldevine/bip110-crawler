@@ -230,6 +230,68 @@ document.addEventListener("keydown", e => {
   }
 });
 
+/// Rich hover content for one block tile — shared by the cube grid and the horizontal strip
+/// so both surface the same detail.
+function tileTooltipHtml(b){
+  const p = b.payload;
+  let payloadLines = "";
+  if (p) {
+    payloadLines =
+        `<hr class="tiphr">`
+      + (p.insc_count ? `inscriptions: ${fmt(p.insc_count)} · ${esc(humanSize(p.insc_bytes))}<br>` : "")
+      + (p.rune_count ? `runes: ${fmt(p.rune_count)}<br>` : "")
+      + (p.data_count ? `OP_RETURN: ${fmt(p.data_count)} · ${esc(humanSize(p.data_bytes))}<br>` : "")
+      + (p.payload_tx_count
+          ? `<b>${pctWeight(p.payload_weight).toFixed(1)}%</b> of block weight carries data<br>`
+          : `no data payloads<br>`)
+      + (p.bip110_reject_count
+          ? `<span class="tox">BIP-110 would reject ${fmt(p.bip110_reject_count)} tx `
+            + `(${pctWeight(p.bip110_reject_weight).toFixed(1)}% weight)</span>`
+          // A signalling block is already voting for BIP-110, so "nothing would reject"
+          // is a given, not news — only worth a line when signalling blocks and
+          // non-signalling ones would say something different.
+          : (b.signals ? "" : `<span class="okc">nothing BIP-110 would reject</span>`));
+  } else {
+    payloadLines = `<hr class="tiphr"><span class="dim">payload scan pending…</span>`;
+  }
+  const s = b.stats;
+  const feeLines = s
+    ? `<hr class="tiphr">`
+      + `fees: <b>${esc(btc(s.total_fee))} BTC</b><br>`
+      + `reward: ${esc(btc(s.total_fee + s.subsidy))} BTC (subsidy ${esc(btc(s.subsidy))})<br>`
+      + `rate: ${fmt(s.median_feerate)} sat/vB median · ${fmt(s.min_feerate)}–${fmt(s.max_feerate)} range`
+    : "";
+  return `<b>Block ${fmt(b.height)}</b><br>`
+    + `${b.signals ? '✓ signalling BIP-110' : '☣ not signalling'}<br>`
+    + `${fmt(b.tx_count)} txs · ${esc(humanSize(b.size))}<br>`
+    + `version 0x${(b.version >>> 0).toString(16)}<br>`
+    + (b.miner ? `miner: ${esc(b.miner)}<br>` : "")
+    + `${esc(shortAge(b.time))}`
+    + feeLines
+    + payloadLines;
+}
+
+/// Wire hover tooltips for a set of tile elements inside `container`, looking each one up by
+/// its `data-h` height via `lookup`. `data-tip-wired` guards against double-binding when this
+/// is called again on tiles that survive an incremental (non-full-replace) re-render, which
+/// the horizontal strip does when paging in more history.
+function wireTileTooltips(container, tip, tiles, lookup){
+  tiles.forEach(el => {
+    if (el.dataset.tipWired) return;
+    el.dataset.tipWired = "1";
+    el.addEventListener("mousemove", e => {
+      const b = lookup(el.dataset.h);
+      if (!b) return;
+      const r = container.getBoundingClientRect();
+      tip.innerHTML = tileTooltipHtml(b);
+      tip.style.left = Math.min(e.clientX - r.left + 14, r.width - 220) + "px";
+      tip.style.top = (e.clientY - r.top + 14) + "px";
+      tip.style.opacity = 1;
+    });
+    el.addEventListener("mouseleave", () => { tip.style.opacity = 0; });
+  });
+}
+
 function renderGrid(){
   const grid = document.getElementById("blockgrid");
   const tip = document.getElementById("btip");
@@ -260,58 +322,149 @@ function renderGrid(){
     </div>`).join("");
   lastSeenHeight = shown[0].height;
 
-  grid.querySelectorAll(".blk").forEach(el => {
-    el.addEventListener("mousemove", e => {
-      const b = BLOCKS.find(x => String(x.height) === el.dataset.h);
-      if (!b) return;
-      const r = grid.getBoundingClientRect();
-      const p = b.payload;
-      let payloadLines = "";
-      if (p) {
-        payloadLines =
-            `<hr class="tiphr">`
-          + (p.insc_count ? `inscriptions: ${fmt(p.insc_count)} · ${esc(humanSize(p.insc_bytes))}<br>` : "")
-          + (p.rune_count ? `runes: ${fmt(p.rune_count)}<br>` : "")
-          + (p.data_count ? `OP_RETURN: ${fmt(p.data_count)} · ${esc(humanSize(p.data_bytes))}<br>` : "")
-          + (p.payload_tx_count
-              ? `<b>${pctWeight(p.payload_weight).toFixed(1)}%</b> of block weight carries data<br>`
-              : `no data payloads<br>`)
-          + (p.bip110_reject_count
-              ? `<span class="tox">BIP-110 would reject ${fmt(p.bip110_reject_count)} tx `
-                + `(${pctWeight(p.bip110_reject_weight).toFixed(1)}% weight)</span>`
-              // A signalling block is already voting for BIP-110, so "nothing would reject"
-              // is a given, not news — only worth a line when signalling blocks and
-              // non-signalling ones would say something different.
-              : (b.signals ? "" : `<span class="okc">nothing BIP-110 would reject</span>`));
-      } else {
-        payloadLines = `<hr class="tiphr"><span class="dim">payload scan pending…</span>`;
-      }
-      const s = b.stats;
-      const feeLines = s
-        ? `<hr class="tiphr">`
-          + `fees: <b>${esc(btc(s.total_fee))} BTC</b><br>`
-          + `reward: ${esc(btc(s.total_fee + s.subsidy))} BTC (subsidy ${esc(btc(s.subsidy))})<br>`
-          + `rate: ${fmt(s.median_feerate)} sat/vB median · ${fmt(s.min_feerate)}–${fmt(s.max_feerate)} range`
-        : "";
-      tip.innerHTML = `<b>Block ${fmt(b.height)}</b><br>`
-        + `${b.signals ? '✓ signalling BIP-110' : '☣ not signalling'}<br>`
-        + `${fmt(b.tx_count)} txs · ${esc(humanSize(b.size))}<br>`
-        + `version 0x${(b.version >>> 0).toString(16)}<br>`
-        + (b.miner ? `miner: ${esc(b.miner)}<br>` : "")
-        + `${esc(shortAge(b.time))}`
-        + feeLines
-        + payloadLines;
-      tip.style.left = Math.min(e.clientX - r.left + 14, r.width - 220) + "px";
-      tip.style.top = (e.clientY - r.top + 14) + "px";
-      tip.style.opacity = 1;
-    });
-    el.addEventListener("mouseleave", () => { tip.style.opacity = 0; });
-  });
+  wireTileTooltips(grid, tip, grid.querySelectorAll(".blk"), h => BLOCKS.find(x => String(x.height) === h));
 
   document.getElementById("blocklegend").innerHTML =
     `<span class="item"><span class="dot" style="background:${cssVar('--good')}"></span>Signalling BIP-110</span>`
     + `<span class="item"><span class="dot" style="background:${cssVar('--c6')}"></span>Not signalling</span>`;
 }
+
+// ---- "All blocks" horizontal scroller — every block the DB has, newest at the left. Unlike
+// the cube grid above (a fixed-size showpiece of the most recent GRID_MAX blocks), this pages
+// in the rest of the DB's rolling window on demand as the user scrolls right, via
+// /api/blocks/page. STRIP is kept newest-first, same convention as BLOCKS.
+let STRIP = [];
+let stripHasMore = true;
+let stripLoading = false;
+let stripLastSeenHeight = null;
+
+function stripTileHtml(b, isNew){
+  return `
+    <div class="stile ${b.signals ? 'good' : 'toxic'}${isNew ? ' arriving' : ''}" data-h="${b.height}">
+      <div class="stile-h">#${fmt(b.height)}</div>
+      <div class="stile-tx">${fmt(b.tx_count)} txs</div>
+      <div class="stile-mark">${b.signals ? '✓' : '☣'}</div>
+      <div class="stile-age">${esc(shortAge(b.time))}</div>
+    </div>`;
+}
+// Placeholder at the trailing (oldest) end: either a loading spinner while a page is in
+// flight, or a fixed marker once the DB's oldest recorded block has been reached. Same
+// footprint as a real tile so appending more history doesn't reflow anything before it.
+function stripSentinelHtml(){
+  return stripHasMore
+    ? `<div class="stile-end" id="strip-sentinel">loading more…</div>`
+    : `<div class="stile-end" id="strip-sentinel">· oldest recorded block ·</div>`;
+}
+function wireStripTooltips(){
+  const strip = document.getElementById("blockstrip");
+  wireTileTooltips(strip, document.getElementById("stip"), strip.querySelectorAll(".stile"),
+    h => STRIP.find(x => String(x.height) === h));
+}
+
+function renderStripInitial(){
+  const strip = document.getElementById("blockstrip");
+  if (!STRIP.length){
+    strip.innerHTML = `<div class="note">No blocks recorded yet — the crawler stores them as new blocks arrive.</div>`;
+    return;
+  }
+  strip.innerHTML = STRIP.map(b => stripTileHtml(b, false)).join("") + stripSentinelHtml();
+  stripLastSeenHeight = STRIP[0].height;
+  wireStripTooltips();
+}
+
+// Swaps the trailing sentinel for the newly-fetched older tiles plus a fresh sentinel —
+// leaves every already-rendered tile untouched, so the user's scroll position doesn't jump.
+function appendOlderStripTiles(blocks){
+  const strip = document.getElementById("blockstrip");
+  const sentinel = document.getElementById("strip-sentinel");
+  const html = blocks.map(b => stripTileHtml(b, false)).join("") + stripSentinelHtml();
+  if (sentinel) sentinel.outerHTML = html; else strip.insertAdjacentHTML("beforeend", html);
+  wireStripTooltips();
+}
+
+// Inserts newly-arrived tip blocks at the front. Prepending shifts every already-rendered
+// tile to the right by the new content's width — a user anchored at the left (scrollLeft 0,
+// i.e. already looking at "now") is unaffected, but anyone scrolled into history would see
+// their view jump unless scrollLeft is nudged forward by the same amount added.
+function prependNewerStripTiles(blocks){
+  const strip = document.getElementById("blockstrip");
+  const prevScrollLeft = strip.scrollLeft;
+  const prevScrollWidth = strip.scrollWidth;
+  const isNew = b => stripLastSeenHeight !== null && b.height > stripLastSeenHeight;
+  strip.insertAdjacentHTML("afterbegin", blocks.map(b => stripTileHtml(b, isNew(b))).join(""));
+  stripLastSeenHeight = STRIP[0].height;
+  if (prevScrollLeft > 0) strip.scrollLeft = prevScrollLeft + (strip.scrollWidth - prevScrollWidth);
+  wireStripTooltips();
+}
+
+async function initStrip(){
+  const strip = document.getElementById("blockstrip");
+  try {
+    const r = await fetch("/api/blocks/page?limit=60");
+    if (!r.ok) throw new Error(String(r.status));
+    const d = await r.json();
+    STRIP = d.blocks || [];
+    stripHasMore = !!d.has_more;
+    renderStripInitial();
+  } catch(e) {
+    strip.innerHTML = `<div class="loading err">Couldn't load block history.</div>`;
+  }
+}
+
+// Polled alongside the main 30s refresh: fetches just the newest few blocks and prepends
+// whatever isn't already in STRIP. A small limit is enough — this only needs to catch
+// however many blocks landed since the last poll, not re-fetch a full page.
+async function refreshStripTip(){
+  if (!STRIP.length || stripLoading) return;
+  try {
+    const r = await fetch("/api/blocks/page?limit=20&_=" + Date.now(), {cache:"no-store"});
+    if (!r.ok) return;
+    const d = await r.json();
+    const known = new Set(STRIP.map(b => b.height));
+    const fresh = (d.blocks || []).filter(b => !known.has(b.height)); // already newest-first
+    if (!fresh.length) return;
+    STRIP = [...fresh, ...STRIP];
+    prependNewerStripTiles(fresh);
+  } catch(e) { /* leave the strip as-is; the next poll retries */ }
+}
+
+async function loadOlderStripPage(){
+  if (stripLoading || !stripHasMore || !STRIP.length) return;
+  stripLoading = true;
+  try {
+    const oldest = STRIP[STRIP.length - 1].height;
+    const r = await fetch(`/api/blocks/page?before=${oldest}&limit=60`);
+    if (!r.ok) throw new Error(String(r.status));
+    const d = await r.json();
+    STRIP = STRIP.concat(d.blocks || []);
+    stripHasMore = !!d.has_more;
+    appendOlderStripTiles(d.blocks || []);
+  } catch(e) {
+    const sentinel = document.getElementById("strip-sentinel");
+    if (sentinel) sentinel.textContent = "couldn't load more — scroll to retry";
+  } finally {
+    stripLoading = false;
+  }
+}
+
+(() => {
+  const strip = document.getElementById("blockstrip");
+  // Load more once the user scrolls near the trailing edge, rather than waiting for it to be
+  // fully in view — 240px of lookahead keeps new tiles ready before they're actually needed.
+  strip.addEventListener("scroll", () => {
+    if (strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 240) loadOlderStripPage();
+  });
+  // A plain vertical mouse wheel would otherwise do nothing over a horizontally-scrolling
+  // strip; trackpad/shift-wheel gestures already send a horizontal delta, so this only takes
+  // over when the vertical component dominates — same convention as mempool.space's own.
+  strip.addEventListener("wheel", e => {
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      strip.scrollLeft += e.deltaY;
+      e.preventDefault();
+    }
+  }, { passive: false });
+})();
+initStrip();
 
 function renderTable(){
   const tbody = document.querySelector("#blocks-table tbody");
@@ -489,6 +642,7 @@ async function load(){
   if (prevHeight !== null && BLOCKS.length && BLOCKS[0].height > prevHeight) {
     announce(BLOCKS[0]);
   }
+  refreshStripTip();
   document.getElementById("gen").textContent =
     "updated " + new Date().toISOString().slice(11,19) + " UTC";
 }
@@ -497,10 +651,18 @@ setInterval(load, 30000);
 
 // Ages are relative ("3m ago"), so tick them between polls or they look frozen.
 setInterval(() => {
-  if (!BLOCKS.length) return;
-  document.querySelectorAll(".blk").forEach(el => {
-    const b = BLOCKS.find(x => String(x.height) === el.dataset.h);
-    const age = el.querySelector(".blk-age");
-    if (b && age) age.textContent = shortAge(b.time);
-  });
+  if (BLOCKS.length) {
+    document.querySelectorAll(".blk").forEach(el => {
+      const b = BLOCKS.find(x => String(x.height) === el.dataset.h);
+      const age = el.querySelector(".blk-age");
+      if (b && age) age.textContent = shortAge(b.time);
+    });
+  }
+  if (STRIP.length) {
+    document.querySelectorAll(".stile").forEach(el => {
+      const b = STRIP.find(x => String(x.height) === el.dataset.h);
+      const age = el.querySelector(".stile-age");
+      if (b && age) age.textContent = shortAge(b.time);
+    });
+  }
 }, 15000);

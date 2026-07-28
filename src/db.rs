@@ -622,6 +622,43 @@ pub fn read_blocks(conn: &Connection, limit: usize) -> Result<Vec<serde_json::Va
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// One page of blocks for the "all blocks" horizontal scroller, newest first. `before` (when
+/// given) restricts to heights strictly below it, so the client can page backwards through
+/// history — newest page first, each subsequent page keyed off the last height it already
+/// has — without ever re-fetching a block or needing to know the DB's total row count.
+///
+/// Requests one extra row over `limit` so `has_more` (whether an older page exists) is known
+/// without a second round trip, then trims it back off before returning.
+pub fn read_blocks_page(
+    conn: &Connection,
+    before: Option<i64>,
+    limit: usize,
+) -> Result<(Vec<serde_json::Value>, bool)> {
+    let limit = limit.max(1);
+    let mut rows: Vec<serde_json::Value> = match before {
+        Some(h) => {
+            let mut st = conn.prepare(&format!(
+                "SELECT {BLOCK_COLS} FROM blocks WHERE height < ?1 ORDER BY height DESC LIMIT ?2"
+            ))?;
+            let out = st
+                .query_map(params![h, (limit + 1) as i64], block_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            out
+        }
+        None => {
+            let mut st = conn
+                .prepare(&format!("SELECT {BLOCK_COLS} FROM blocks ORDER BY height DESC LIMIT ?1"))?;
+            let out = st
+                .query_map(params![(limit + 1) as i64], block_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            out
+        }
+    };
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    Ok((rows, has_more))
+}
+
 /// Blocks in the CURRENT difficulty period that signal BIP-110, newest first, with full
 /// detail. The period is retarget-aligned (`[start, tip]`, start divisible by `period_len`)
 /// to match how BIP8 tallies signalling — the same window the crawler's signalling scan uses.

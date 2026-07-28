@@ -578,6 +578,41 @@ td.mono, .mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }
   .newblock.show { transform:none; }
 }
 
+/* Flat 2D tiles for the "all blocks" horizontal scroller — unlike .blockgrid's 3D cubes,
+   this can hold hundreds of tiles at once as history loads in, so it deliberately skips the
+   per-tile mote layer and 3D transforms that make the cube grid expensive to repeat. */
+.blockstrip { display:flex; align-items:stretch; gap:10px; overflow-x:auto; overflow-y:hidden;
+  padding:6px 6px 14px; scrollbar-color:var(--border) transparent; }
+.stile { flex:none; width:78px; height:88px; border-radius:8px; cursor:default;
+  border:1px solid var(--border); background:var(--surface-2);
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:3px; text-align:center; transition:transform .12s ease, box-shadow .12s ease; }
+.stile:hover { transform:translateY(-3px); z-index:1; }
+.stile.good { border-color:color-mix(in srgb,var(--good) 55%, transparent);
+  background:color-mix(in srgb,var(--good) 13%, var(--surface-2)); }
+.stile.good:hover { box-shadow:0 0 14px color-mix(in srgb,var(--good) 40%, transparent); }
+.stile.toxic { border-color:color-mix(in srgb,var(--c6) 55%, transparent);
+  background:color-mix(in srgb,var(--c6) 13%, var(--surface-2)); }
+.stile.toxic:hover { box-shadow:0 0 14px color-mix(in srgb,var(--c6) 40%, transparent); }
+.stile-h { font-family:var(--mono); font-size:12.5px; font-weight:700; color:var(--ink); }
+.stile-tx { font-family:var(--mono); font-size:10px; color:var(--ink-2); }
+.stile-age { font-family:var(--mono); font-size:9.5px; color:var(--muted); }
+.stile-mark { font-size:13px; line-height:1; }
+.stile.good .stile-mark { color:var(--good); }
+.stile.toxic .stile-mark { color:var(--warn); font-size:16px; }
+.stile.arriving { animation:blk-in .5s ease-out; }
+.stile.good.arriving  { animation:blk-in .5s ease-out, blk-flash-good  1.1s ease-in-out 3; }
+.stile.toxic.arriving { animation:blk-in .5s ease-out, blk-flash-toxic 1.1s ease-in-out 3; }
+/* End-of-strip states: a loading spinner tile while the next page fetches, and a fixed
+   marker once the oldest block the DB has ever seen is reached. Same footprint as a real
+   tile so the strip doesn't jump when one swaps for the other. */
+.stile-end { flex:none; width:78px; height:88px; display:flex; align-items:center;
+  justify-content:center; text-align:center; font-family:var(--mono); font-size:10px;
+  color:var(--muted); padding:0 6px; }
+@media (prefers-reduced-motion: reduce) {
+  .stile.arriving, .stile.good.arriving, .stile.toxic.arriving { animation:none; }
+}
+
 /* ---- stats page: reachable vs dead split ---- */
 .split { display:flex; height:40px; border-radius:8px; overflow:hidden; border:1px solid var(--border);
   background:var(--surface-2); }

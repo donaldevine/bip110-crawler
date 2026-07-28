@@ -526,6 +526,14 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
     // re-measured from the node during the crawl (see the snapshot callback) so the
     // report's tip height + lock-in countdown track the chain instead of freezing.
     let signal_cache: Arc<Mutex<Option<node::SignalStats>>> = Arc::new(Mutex::new(signalling.clone()));
+    // Whether the snapshot callback has run its block/chain-split/cluster refresh at least
+    // once this process. Seeding `signal_cache` from the startup scan (above) means the tip
+    // it already knows about is whatever height was current the moment this process started —
+    // so if no new block has been mined since, the callback's `cached_tip != Some(tip)` check
+    // never trips, and the block just-mined-before-startup (and everything the chain-split and
+    // cluster checks do) silently never gets stored until the NEXT block arrives, however long
+    // that takes. This forces that refresh to run on the first tick regardless, closing the gap.
+    let refreshed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Live snapshots: rewrite the report every N seconds *during* the crawl, so a long
     // run can be watched as the DFS expands.
@@ -547,6 +555,7 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
         let signal_window = args.signal_window;
         let signal_bit = args.signal_bit;
         let signal_cache_cb = Arc::clone(&signal_cache);
+        let refreshed_once_cb = Arc::clone(&refreshed_once);
         let cb: crawler::SnapshotFn = Arc::new(move |mut nodes: Vec<NodeInfo>, mut edges: Vec<Edge>| {
             let discovered_total = nodes.len();
             // Re-measure signalling when the node has a NEW block, so the tip height and
@@ -554,7 +563,10 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
             if let (Some(client), true) = (&rpc, signal_window > 0) {
                 if let Ok(tip) = client.block_count() {
                     let cached_tip = signal_cache_cb.lock().unwrap().as_ref().map(|s| s.tip_height);
-                    if cached_tip != Some(tip) {
+                    // `swap` both reads and marks "done" atomically, so this is true on the
+                    // very first tick only, however the tip compares.
+                    let first_tick = !refreshed_once_cb.swap(true, std::sync::atomic::Ordering::Relaxed);
+                    if cached_tip != Some(tip) || first_tick {
                         // The period scan returns the heights of every signalling block it
                         // found; used below to backfill any that fall outside the recent
                         // window, so the explorer's "signalling this period" list is

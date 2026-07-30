@@ -244,13 +244,16 @@ function tileTooltipHtml(b){
       + (p.payload_tx_count
           ? `<b>${pctWeight(p.payload_weight).toFixed(1)}%</b> of block weight carries data<br>`
           : `no data payloads<br>`)
-      + (p.bip110_reject_count
+      // A block that signals BIP-110 is not thereby enforcing it — signalling is just a
+      // version-bit vote, so a signalling block can still contain transactions the rule would
+      // reject. But this line is about what BIP-110 WOULD do, and a signalling miner is
+      // already on record wanting exactly that outcome, so stating it either way (rejects
+      // something / rejects nothing) is not news for that block — only worth a line for a
+      // non-signalling one, where it actually contrasts with the miner's own vote.
+      + (b.signals ? "" : p.bip110_reject_count
           ? `<span class="tox">BIP-110 would reject ${fmt(p.bip110_reject_count)} tx `
             + `(${pctWeight(p.bip110_reject_weight).toFixed(1)}% weight)</span>`
-          // A signalling block is already voting for BIP-110, so "nothing would reject"
-          // is a given, not news — only worth a line when signalling blocks and
-          // non-signalling ones would say something different.
-          : (b.signals ? "" : `<span class="okc">nothing BIP-110 would reject</span>`));
+          : `<span class="okc">nothing BIP-110 would reject</span>`);
   } else {
     payloadLines = `<hr class="tiphr"><span class="dim">payload scan pending…</span>`;
   }

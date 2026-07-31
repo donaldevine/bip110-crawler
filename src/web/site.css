@@ -656,6 +656,9 @@ footer { margin-top:40px; color:var(--muted); font-size:11.5px; font-family:var(
 .entropy-controls { display:flex; flex-wrap:wrap; align-items:center; gap:18px; }
 .entropy-controls label { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--ink-2); cursor:pointer; }
 .entropy-controls input[type=radio] { accent-color:var(--neon); }
+/* Keeps the base and exponent of "2^128"/"2^256" from wrapping onto separate lines when a
+   label runs out of room. */
+.keyspace { white-space:nowrap; }
 .btn:disabled { opacity:.4; cursor:not-allowed; }
 .btn:disabled:hover { border-color:var(--border); box-shadow:none; }
 .entropy-output { margin-top:20px; }

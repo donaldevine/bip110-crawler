@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use sha3::Sha3_256;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A peer we can dial: either a clearnet socket or a Tor v3 onion service.
 /// (I2P/CJDNS could be added the same way, each needing its own proxy.)
@@ -266,6 +266,11 @@ pub struct PeerVersion {
     pub services: u64,
     pub user_agent: String,
     pub start_height: i32,
+    /// Wall-clock time from opening the connection to completing the version/verack
+    /// handshake, in milliseconds. A rough proxy for round-trip time — it also includes
+    /// TCP connect and the peer's own processing, so it's a "how responsive is this peer"
+    /// figure rather than a pure network RTT.
+    pub latency_ms: u32,
 }
 
 // ---- CompactSize (varint) helpers -------------------------------------------
@@ -439,6 +444,7 @@ fn parse_version_payload(payload: &[u8]) -> Result<PeerVersion> {
         services,
         user_agent,
         start_height,
+        latency_ms: 0, // filled in by the caller, which alone knows how long the dial took
     })
 }
 
@@ -567,6 +573,9 @@ pub fn probe_peer(
         (connect_timeout, io_timeout, addr_collect)
     };
 
+    // Measured from the first connect byte to a completed handshake, so it reflects both
+    // network RTT and the peer's own responsiveness — not a pure ping.
+    let t0 = Instant::now();
     let (mut stream, recv_ip, recv_port) = match peer {
         Peer::Clearnet(sa) => {
             let s = TcpStream::connect_timeout(sa, ct).with_context(|| format!("connect {sa}"))?;
@@ -610,7 +619,8 @@ pub fn probe_peer(
             break;
         }
     }
-    let peer_version = peer_version.ok_or_else(|| anyhow!("peer never sent version"))?;
+    let mut peer_version = peer_version.ok_or_else(|| anyhow!("peer never sent version"))?;
+    peer_version.latency_ms = u32::try_from(t0.elapsed().as_millis()).unwrap_or(u32::MAX);
 
     // 3. Ask for addresses — and, when a locator is supplied, the peer's own chain — then
     //    collect both in one bounded window. `getheaders` rides along inside the window we

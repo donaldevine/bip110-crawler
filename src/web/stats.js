@@ -21,6 +21,7 @@ const SLOT_OF = {
 };
 const IMPL_ORDER = Object.keys(SLOT_OF);
 const implOf = name => IMPL_ORDER.find(i => name.startsWith(i)) || "Other";
+const implColor = name => `var(${SLOT_OF[implOf(name)] || "--c9"})`;
 
 function hexToRgb(h){
   h = String(h).trim().replace("#","");
@@ -56,6 +57,54 @@ function renderCards(){
     `<div class="card"><div class="label">${esc(l)}</div>
      <div class="value">${esc(v)}</div>
      <div class="note">${esc(n)}</div></div>`).join("");
+}
+
+// Label a latency bucket: "<50ms", "100-200ms", or "3000ms+" for the open-ended top band.
+const latencyLabel = b => b.max_ms == null ? `${fmt(b.min_ms)}ms+`
+                         : b.min_ms === 0 ? `<${fmt(b.max_ms)}ms`
+                         : `${fmt(b.min_ms)}-${fmt(b.max_ms)}ms`;
+
+function renderLatency(){
+  const l = (STATS && STATS.latency) || { sampled: 0, median_ms: null, buckets: [], by_implementation_median_ms: {} };
+  const cardsEl = document.getElementById("latency-cards");
+  const histEl = document.getElementById("chart-latency");
+  const implEl = document.getElementById("chart-latency-impl");
+  if (!l.sampled){
+    cardsEl.innerHTML = `<div class="note">No handshake measurements yet — these come from this
+      crawler's own P2P connections, not RPC, so they fill in as it (re)crawls the network.</div>`;
+    histEl.innerHTML = ""; implEl.innerHTML = "";
+    return;
+  }
+  cardsEl.innerHTML = [
+    ["Peers sampled", fmt(l.sampled), "with a measured handshake time"],
+    ["Median latency", fmt(l.median_ms) + " ms", "connect through verack, network-wide"],
+  ].map(([lab,v,n]) =>
+    `<div class="card"><div class="label">${esc(lab)}</div>
+     <div class="value">${esc(v)}</div>
+     <div class="note">${esc(n)}</div></div>`).join("");
+
+  const maxCount = Math.max(1, ...l.buckets.map(b => b.count));
+  histEl.innerHTML = l.buckets.map(b => `
+    <div class="bar-row" title="${fmt(b.count)} peers">
+      <div class="name">${esc(latencyLabel(b))}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${(b.count/maxCount*100).toFixed(1)}%"></div></div>
+      <div class="num">${fmt(b.count)}</div>
+    </div>`).join("");
+
+  const byImpl = Object.entries(l.by_implementation_median_ms || {}).sort((a,b) => a[1]-b[1]);
+  if (!byImpl.length){
+    implEl.innerHTML = "";
+    return;
+  }
+  const maxMs = Math.max(1, ...byImpl.map(([,ms]) => ms));
+  implEl.innerHTML = `<div class="note" style="margin-bottom:8px;">Median handshake time by client
+      (clients with too few samples are omitted):</div>` + byImpl.map(([name,ms]) => `
+    <div class="bar-row" title="${esc(name)}">
+      <div class="name" title="${esc(name)}">${esc(name)}</div>
+      <div class="bar-track"><div class="bar-fill"
+        style="width:${(ms/maxMs*100).toFixed(1)}%;background:${implColor(name)}"></div></div>
+      <div class="num">${fmt(ms)} ms</div>
+    </div>`).join("");
 }
 
 function renderSplit(){
@@ -214,6 +263,7 @@ async function load(){
     return;
   }
   renderCards();
+  renderLatency();
   renderSplit();
   historyChart.update(STATS.history);
   doneLoading();

@@ -93,6 +93,86 @@ pub struct BlockInfo {
     pub miner: String,
 }
 
+/// One band of the mempool fee-rate histogram: pending transactions whose feerate falls in
+/// `[min_feerate, max_feerate)` sat/vB. `max_feerate` is `None` for the open-ended top band.
+/// Empty bands are omitted, so this list is only as long as the mempool actually spans.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeeBucket {
+    pub min_feerate: f64,
+    pub max_feerate: Option<f64>,
+    pub count: u32,
+    pub vsize: i64,
+}
+
+/// A snapshot of the node's mempool: aggregate stats plus a fee-rate histogram, taken from
+/// `getmempoolinfo` + `getrawmempool(true)`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MempoolSnapshot {
+    pub pending: u32,
+    /// Total virtual size of pending transactions (vbytes).
+    pub vsize: i64,
+    pub usage_bytes: i64,
+    /// Sum of fees waiting to be mined, in BTC.
+    pub total_fee: f64,
+    /// The node's current minimum accepted feerate, in sat/vB.
+    pub min_relay_feerate: f64,
+    pub histogram: Vec<FeeBucket>,
+    /// Feerate (sat/vB) of the transaction that would be the last one to fit in a
+    /// block-sized (1,000,000 vbyte) slice of the mempool, taken highest-feerate-first —
+    /// i.e. roughly what a transaction needs to pay to clear in the next block. `None`
+    /// when the whole mempool is smaller than one block.
+    pub next_block_feerate: Option<f64>,
+}
+
+/// Fee-rate band edges (sat/vB) for the histogram, Fibonacci-ish so low-fee spam and
+/// high-fee spikes both get their own bands instead of being flattened into one bucket.
+const FEE_BUCKET_EDGES: &[f64] = &[
+    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0,
+    100.0, 120.0, 150.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0, 1000.0,
+];
+
+/// A standard block's vsize capacity (4,000,000 weight units / 4).
+const BLOCK_VSIZE: i64 = 1_000_000;
+
+/// Bucket `(feerate, vsize)` pairs into the fixed fee bands, dropping empty bands.
+fn bucket_histogram(rates: &[(f64, i64)]) -> Vec<FeeBucket> {
+    let n = FEE_BUCKET_EDGES.len();
+    let mut counts = vec![0u32; n + 1];
+    let mut vsizes = vec![0i64; n + 1];
+    for &(rate, vs) in rates {
+        let idx = FEE_BUCKET_EDGES.iter().position(|&e| rate < e).unwrap_or(n);
+        counts[idx] += 1;
+        vsizes[idx] += vs;
+    }
+    let mut out = Vec::new();
+    let mut lo = 0.0;
+    for i in 0..=n {
+        let hi = FEE_BUCKET_EDGES.get(i).copied();
+        if counts[i] > 0 {
+            out.push(FeeBucket { min_feerate: lo, max_feerate: hi, count: counts[i], vsize: vsizes[i] });
+        }
+        if let Some(h) = hi {
+            lo = h;
+        }
+    }
+    out
+}
+
+/// The feerate needed to land in roughly the next block: walk pending transactions
+/// highest-feerate-first, accumulating vsize until a block's worth is covered.
+fn next_block_feerate(rates: &[(f64, i64)]) -> Option<f64> {
+    let mut sorted = rates.to_vec();
+    sorted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut acc = 0i64;
+    for (rate, vs) in sorted {
+        acc += vs;
+        if acc >= BLOCK_VSIZE {
+            return Some(rate);
+        }
+    }
+    None
+}
+
 pub struct RpcClient {
     url: String,
     user: String,
@@ -293,6 +373,49 @@ impl RpcClient {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    /// A snapshot of the node's mempool: aggregate stats from `getmempoolinfo` plus a
+    /// fee-rate histogram and next-block feerate estimate built from `getrawmempool(true)`.
+    ///
+    /// The verbose mempool listing is the expensive part — one entry per pending
+    /// transaction — so callers should poll this on its own cadence rather than on every
+    /// block (the mempool changes continuously, unlike blocks).
+    pub fn mempool_snapshot(&self) -> Result<MempoolSnapshot> {
+        let info = self.call("getmempoolinfo", json!([]))?;
+        let pending = info.get("size").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let vsize = info.get("bytes").and_then(Value::as_i64).unwrap_or(0);
+        let usage_bytes = info.get("usage").and_then(Value::as_i64).unwrap_or(0);
+        let total_fee = info.get("total_fee").and_then(Value::as_f64).unwrap_or(0.0);
+        // mempoolminfee is BTC/kvB; sat/vB = btc * 1e8 sats/BTC / 1000 vB/kvB.
+        let min_relay_feerate =
+            info.get("mempoolminfee").and_then(Value::as_f64).unwrap_or(0.0) * 1e8 / 1000.0;
+
+        let raw = self.call("getrawmempool", json!([true]))?;
+        let entries = raw.as_object().cloned().unwrap_or_default();
+        let mut rates: Vec<(f64, i64)> = Vec::with_capacity(entries.len());
+        for e in entries.values() {
+            let vs = e.get("vsize").and_then(Value::as_i64).unwrap_or(0);
+            if vs <= 0 {
+                continue;
+            }
+            let fee_btc = e
+                .get("fees")
+                .and_then(|f| f.get("base"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            rates.push((fee_btc * 1e8 / vs as f64, vs));
+        }
+
+        Ok(MempoolSnapshot {
+            pending,
+            vsize,
+            usage_bytes,
+            total_fee,
+            min_relay_feerate,
+            histogram: bucket_histogram(&rates),
+            next_block_feerate: next_block_feerate(&rates),
+        })
     }
 
     /// Current best-block height (`getblockcount`) — a cheap tip check used to decide
@@ -852,6 +975,47 @@ mod tests {
         ]));
         assert_eq!(p.bip110_reject_count, 1, "only the annex-carrying spend is a rule-4 reject");
         assert_eq!(p.bip110_reject_weight, 1000);
+    }
+
+    #[test]
+    fn histogram_buckets_by_feerate_and_drops_empty_bands() {
+        let rates = vec![(0.5, 100), (0.9, 50), (5.5, 200), (5.7, 300), (5000.0, 10)];
+        let hist = bucket_histogram(&rates);
+        // Bands with no transactions (e.g. 2–3 sat/vB) are omitted entirely, so the list is
+        // far shorter than the full edge table.
+        assert_eq!(hist.len(), 3);
+
+        let below_one = &hist[0];
+        assert_eq!(below_one.min_feerate, 0.0);
+        assert_eq!(below_one.max_feerate, Some(1.0));
+        assert_eq!(below_one.count, 2);
+        assert_eq!(below_one.vsize, 150);
+
+        let five_to_six = &hist[1];
+        assert_eq!(five_to_six.min_feerate, 5.0);
+        assert_eq!(five_to_six.max_feerate, Some(6.0));
+        assert_eq!(five_to_six.count, 2);
+        assert_eq!(five_to_six.vsize, 500);
+
+        let top = &hist[2];
+        assert_eq!(top.min_feerate, 1000.0);
+        assert_eq!(top.max_feerate, None, "the top band is open-ended");
+        assert_eq!(top.count, 1);
+    }
+
+    #[test]
+    fn next_block_feerate_walks_highest_first_until_a_block_fills() {
+        // Two transactions of 600,000 vsize each: the higher-feerate one alone doesn't fill
+        // a block, but combined with the second it crosses the 1,000,000 vsize line — so the
+        // reported feerate is the SECOND (lower) transaction's, not the first.
+        let rates = vec![(50.0, 600_000), (10.0, 600_000)];
+        assert_eq!(next_block_feerate(&rates), Some(10.0));
+    }
+
+    #[test]
+    fn next_block_feerate_is_none_when_mempool_is_smaller_than_a_block() {
+        let rates = vec![(50.0, 1_000), (10.0, 2_000)];
+        assert_eq!(next_block_feerate(&rates), None);
     }
 }
 

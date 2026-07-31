@@ -439,6 +439,7 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
                     last_seen: crate::time::now_iso(),
                     times_seen: 0,
                     online: true,
+                    latency_ms: Some(ver.latency_ms),
                 };
                 shared.nodes.lock().unwrap().insert(addr.clone(), info);
 
@@ -495,6 +496,7 @@ fn worker(shared: Arc<Shared>, cfg: CrawlConfig, onion_pool: bool) {
                     last_seen: String::new(),
                     times_seen: 0,
                     online: false,
+                    latency_ms: None,
                 });
             }
         }

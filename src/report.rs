@@ -91,6 +91,8 @@ const CHAINS_HTML: &str = include_str!("web/chains.html");
 const CHAINS_JS: &str = include_str!("web/chains.js");
 const BLOCKS_HTML: &str = include_str!("web/blocks.html");
 const BLOCKS_JS: &str = include_str!("web/blocks.js");
+const MEMPOOL_HTML: &str = include_str!("web/mempool.html");
+const MEMPOOL_JS: &str = include_str!("web/mempool.js");
 
 /// The live activity ticker, shared by every page (see `web/ticker.js`). It injects its own
 /// element and fetches `/api/ticker` itself, so it works identically on all pages regardless of
@@ -164,6 +166,12 @@ pub fn render_chains_html() -> String {
 /// whether they signal BIP-110.
 pub fn render_blocks_html() -> String {
     assemble(BLOCKS_HTML, BLOCKS_JS)
+}
+
+/// The mempool view (served at `/mempool`): fee-rate histogram and aggregate stats from the
+/// node's own mempool, fed by `/api/mempool`.
+pub fn render_mempool_html() -> String {
+    assemble(MEMPOOL_HTML, MEMPOOL_JS)
 }
 
 /// The "Support this project" page (served at `/support`). Addresses and QR image paths

@@ -618,6 +618,7 @@ const table = (function(){
         <td>${n.protocol_version||"—"}</td>
         <td>${n.depth}</td>
         <td><span class="pill ${pillClass(n.bip110)}">${pillText(n.bip110)}</span></td>
+        <td>${n.latency_ms != null ? n.latency_ms + " ms" : "—"}</td>
       </tr>`).join("");
   }
   function updatePager(){

@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   addr TEXT PRIMARY KEY, depth INTEGER, protocol_version INTEGER, user_agent TEXT,
   services INTEGER, start_height INTEGER, handshaked INTEGER, implementation TEXT,
   version TEXT, bip110 TEXT, first_seen TEXT, last_seen TEXT, times_seen INTEGER,
-  online INTEGER, lat REAL, lon REAL, country TEXT, country_code TEXT, city TEXT
+  online INTEGER, lat REAL, lon REAL, country TEXT, country_code TEXT, city TEXT,
+  latency_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS edges (from_addr TEXT, to_addr TEXT);
 -- Hourly points of the reachable population, so /stats can graph how the client mix
@@ -65,6 +66,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     // bring older DBs up to date. Erroring means the column is already there.
     let _ = conn.execute("ALTER TABLE blocks ADD COLUMN payload TEXT", []);
     let _ = conn.execute("ALTER TABLE blocks ADD COLUMN stats TEXT", []);
+    let _ = conn.execute("ALTER TABLE nodes ADD COLUMN latency_ms INTEGER", []);
     // The old single-column online index is fully covered by idx_nodes_fresh's leftmost prefix;
     // drop it so writes don't maintain a redundant b-tree. (No-op on a fresh DB.)
     let _ = conn.execute("DROP INDEX IF EXISTS idx_nodes_online", []);
@@ -289,8 +291,8 @@ pub fn write_snapshot(
             "INSERT INTO nodes
              (addr,depth,protocol_version,user_agent,services,start_height,handshaked,
               implementation,version,bip110,first_seen,last_seen,times_seen,online,
-              lat,lon,country,country_code,city)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+              lat,lon,country,country_code,city,latency_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
              ON CONFLICT(addr) DO UPDATE SET
                depth=excluded.depth, protocol_version=excluded.protocol_version,
                user_agent=excluded.user_agent, services=excluded.services,
@@ -307,7 +309,11 @@ pub fn write_snapshot(
                lat=COALESCE(excluded.lat, lat), lon=COALESCE(excluded.lon, lon),
                country=COALESCE(excluded.country, country),
                country_code=COALESCE(excluded.country_code, country_code),
-               city=COALESCE(excluded.city, city)
+               city=COALESCE(excluded.city, city),
+               -- Only a fresh measurement (a real handshake) can update latency; a write with
+               -- none (RPC-only record, or a probe that never got far enough to time) keeps
+               -- whatever was last actually measured, same as geo above.
+               latency_ms=COALESCE(excluded.latency_ms, latency_ms)
              WHERE excluded.handshaked=1 OR nodes.handshaked=0",
         )?;
         for n in nodes {
@@ -327,7 +333,7 @@ pub fn write_snapshot(
                 stance_str(&n.bip110), n.first_seen, last_seen, n.times_seen, n.online as i64,
                 g.map(|x| x.lat), g.map(|x| x.lon),
                 g.map(|x| x.country.clone()), g.map(|x| x.country_code.clone()),
-                g.map(|x| x.city.clone()),
+                g.map(|x| x.city.clone()), n.latency_ms.map(|v| v as i64),
             ])?;
         }
         let mut ei = tx.prepare("INSERT OR IGNORE INTO edges (from_addr,to_addr) VALUES (?1,?2)")?;
@@ -384,6 +390,7 @@ fn row_to_node(r: &rusqlite::Row) -> rusqlite::Result<(NodeInfo, Option<GeoInfo>
         last_seen: r.get("last_seen")?,
         times_seen: r.get("times_seen")?,
         online: r.get::<_, i64>("online")? != 0,
+        latency_ms: r.get::<_, Option<i64>>("latency_ms")?.map(|v| v as u32),
     };
     let geo = match (r.get::<_, Option<f64>>("lat")?, r.get::<_, Option<f64>>("lon")?) {
         (Some(lat), Some(lon)) => Some(GeoInfo {
@@ -450,9 +457,11 @@ pub fn read_report(conn: &Connection, max: usize, max_age_secs: u64) -> Result<R
     // Aggregates over reachable nodes only.
     let mut agg = Aggregates::default();
     agg.total_nodes = reachable_total;
+    let mut latencies = Vec::new();
     {
         let mut st = conn.prepare(&format!(
-            "SELECT implementation, version, user_agent, online, handshaked, addr FROM nodes WHERE {fresh}"
+            "SELECT implementation, version, user_agent, online, handshaked, addr, latency_ms
+             FROM nodes WHERE {fresh}"
         ))?;
         let rows = st.query_map([], |r| {
             Ok((
@@ -462,10 +471,11 @@ pub fn read_report(conn: &Connection, max: usize, max_age_secs: u64) -> Result<R
                 r.get::<_, i64>(3)? != 0,
                 r.get::<_, i64>(4)? != 0,
                 r.get::<_, String>(5)?,
+                r.get::<_, Option<i64>>(6)?,
             ))
         })?;
         for row in rows {
-            let (impl_, version, user_agent, online, handshaked, addr) = row?;
+            let (impl_, version, user_agent, online, handshaked, addr, latency_ms) = row?;
             *agg.by_implementation.entry(impl_.clone()).or_default() += 1;
             let vkey = if version.is_empty() { impl_.clone() } else { format!("{impl_} {version}") };
             *agg.by_version.entry(vkey).or_default() += 1;
@@ -481,8 +491,14 @@ pub fn read_report(conn: &Connection, max: usize, max_age_secs: u64) -> Result<R
             // Count Tor nodes over the FULL reachable set (not the size-capped node list),
             // so the dashboard's "Tor nodes" figure is exact even when the report is capped.
             if addr.contains(".onion") { agg.onion_nodes += 1; }
+            if online {
+                if let Some(ms) = latency_ms {
+                    latencies.push(ms as u32);
+                }
+            }
         }
     }
+    (agg.latency_buckets, agg.median_latency_ms) = crate::node::latency_histogram(latencies);
 
     // Bounded node set: reachable first, then the rest, up to `max`.
     let mut nodes = Vec::new();
@@ -556,6 +572,7 @@ pub struct NodeRow {
     pub last_seen: String,
     pub city: Option<String>,
     pub country: Option<String>,
+    pub latency_ms: Option<u32>,
 }
 
 /// Store blocks for the explorer (upsert by height; blocks are immutable so re-storing
@@ -784,6 +801,22 @@ pub fn read_chain_clusters(conn: &Connection) -> Option<serde_json::Value> {
     meta_get(conn, "chain_clusters").and_then(|s| serde_json::from_str(&s).ok())
 }
 
+/// Record the latest mempool snapshot (aggregate stats + fee-rate histogram). Written by the
+/// crawler on every refresh tick — unlike blocks, the mempool changes continuously rather
+/// than once per ~10 minutes, so this isn't gated on a new tip the way blocks/chain-split are.
+pub fn write_mempool(conn: &Connection, snap: &crate::rpc::MempoolSnapshot) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key,value) VALUES ('mempool', ?1)",
+        params![serde_json::to_string(snap)?],
+    )?;
+    Ok(())
+}
+
+/// The stored mempool snapshot, or None before the crawler has recorded one.
+pub fn read_mempool(conn: &Connection) -> Option<crate::rpc::MempoolSnapshot> {
+    meta_get(conn, "mempool").and_then(|s| serde_json::from_str(&s).ok())
+}
+
 /// The stored chain-split assessment, or None before the crawler has made one.
 pub fn read_chain_split(conn: &Connection) -> Option<crate::node::ChainSplit> {
     meta_get(conn, "chain_split").and_then(|s| serde_json::from_str(&s).ok())
@@ -942,6 +975,34 @@ pub fn read_stats(conn: &Connection, max_age_secs: u64) -> Result<serde_json::Va
         |r| r.get(0),
     )?;
 
+    // Handshake-latency distribution: per-implementation samples, so the histogram can be
+    // built once and a per-client median reported alongside without a second query.
+    let mut latencies_by_impl: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+    {
+        let mut st = conn.prepare(&format!(
+            "SELECT implementation, latency_ms FROM nodes WHERE {fresh} AND latency_ms IS NOT NULL"
+        ))?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (impl_, ms) = row?;
+            latencies_by_impl.entry(impl_).or_default().push(ms as u32);
+        }
+    }
+    let all_latencies: Vec<u32> = latencies_by_impl.values().flatten().copied().collect();
+    let sampled_latency = all_latencies.len();
+    let (latency_buckets, median_latency_ms) = crate::node::latency_histogram(all_latencies);
+    // Per-implementation median, skipping clients with too few samples for the figure to mean
+    // anything — a couple of stray peers shouldn't produce a headline number.
+    const MIN_LATENCY_SAMPLE: usize = 5;
+    let latency_by_implementation: BTreeMap<String, u32> = latencies_by_impl
+        .into_iter()
+        .filter(|(_, v)| v.len() >= MIN_LATENCY_SAMPLE)
+        .map(|(impl_, mut v)| {
+            v.sort_unstable();
+            (impl_, v[v.len() / 2])
+        })
+        .collect();
+
     // Hourly population series (client versions over time), newest 30 days, returned
     // chronologically. Capped so the payload stays small as history accumulates.
     let mut history = Vec::new();
@@ -969,6 +1030,12 @@ pub fn read_stats(conn: &Connection, max_age_secs: u64) -> Result<serde_json::Va
         "distinct_versions": distinct_versions,
         "max_age_hours": max_age_secs / 3600,
         "history": history,
+        "latency": {
+            "sampled": sampled_latency,
+            "median_ms": median_latency_ms,
+            "buckets": latency_buckets,
+            "by_implementation_median_ms": latency_by_implementation,
+        },
     }))
 }
 
@@ -1007,7 +1074,7 @@ pub fn read_nodes(
     let arg_refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|b| b.as_ref()).collect();
 
     let sql = format!(
-        "SELECT addr,implementation,version,protocol_version,depth,user_agent,online,last_seen,city,country
+        "SELECT addr,implementation,version,protocol_version,depth,user_agent,online,last_seen,city,country,latency_ms
          FROM nodes {where_sql}"
     );
     let mut st = conn.prepare(&sql)?;
@@ -1027,6 +1094,7 @@ pub fn read_nodes(
                 last_seen: r.get(7)?,
                 city: r.get(8)?,
                 country: r.get(9)?,
+                latency_ms: r.get::<_, Option<i64>>(10)?.map(|v| v as u32),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1043,6 +1111,10 @@ pub fn read_nodes(
         "protocol_version" => rows.sort_by(|a, b| a.protocol_version.cmp(&b.protocol_version)),
         "bip110" => rows.sort_by(|a, b| a.bip110.cmp(&b.bip110)),
         "location" | "country" => rows.sort_by(|a, b| a.country.cmp(&b.country)),
+        // Unmeasured (None) sorts first ascending — reads as "slowest/unknown" at the top
+        // only when the column is flipped to descending, which is how you'd actually browse
+        // "who's fastest".
+        "latency" => rows.sort_by(|a, b| a.latency_ms.cmp(&b.latency_ms)),
         _ => rows.sort_by(|a, b| a.depth.cmp(&b.depth)),
     }
     if dir_desc {
@@ -1065,6 +1137,7 @@ mod tests {
             chain_hash: String::new(), handshaked: online, implementation: "Bitcoin Core".into(),
             version: "27.0.0".into(), bip110: Bip110Stance::NotEnforcing,
             first_seen: String::new(), last_seen: String::new(), times_seen: 0, online,
+            latency_ms: None,
         }
     }
 
@@ -1076,6 +1149,7 @@ mod tests {
             implementation: "Unreachable".into(), version: String::new(),
             bip110: Bip110Stance::Unknown, first_seen: String::new(),
             last_seen: String::new(), times_seen: 0, online: false,
+            latency_ms: None,
         }
     }
 
@@ -1217,6 +1291,40 @@ mod tests {
             .query_row("SELECT first_seen FROM nodes WHERE addr='8.8.4.4:8333'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(fs2, "2026-07-24T13:00:00Z", "an empty first_seen should be fillable");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn latency_measurement_persists_until_a_fresher_one_arrives() {
+        let path = std::env::temp_dir()
+            .join(format!("bip110_db_latency_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = open(&path).unwrap();
+        let own = own_stub();
+        let addr = "10.10.10.10:8333";
+
+        let mut n1 = node(addr, true);
+        n1.latency_ms = Some(120);
+        write_snapshot(&mut conn, "t1", "main", &own, &None, &[n1], &[], &BTreeMap::new()).unwrap();
+
+        let get = |c: &Connection| -> Option<i64> {
+            c.query_row("SELECT latency_ms FROM nodes WHERE addr=?1", params![addr], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(get(&conn), Some(120));
+
+        // A write with no measurement (e.g. an RPC-only placeholder) must not blank it out —
+        // same COALESCE rule as geo.
+        let mut n2 = node(addr, true);
+        n2.latency_ms = None;
+        write_snapshot(&mut conn, "t2", "main", &own, &None, &[n2], &[], &BTreeMap::new()).unwrap();
+        assert_eq!(get(&conn), Some(120), "a write with no measurement must not clear the old one");
+
+        // A fresh measurement replaces the stale one.
+        let mut n3 = node(addr, true);
+        n3.latency_ms = Some(45);
+        write_snapshot(&mut conn, "t3", "main", &own, &None, &[n3], &[], &BTreeMap::new()).unwrap();
+        assert_eq!(get(&conn), Some(45), "a fresh measurement should replace the old one");
 
         let _ = std::fs::remove_file(&path);
     }

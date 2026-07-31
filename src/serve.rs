@@ -176,6 +176,15 @@ fn handle(
         return;
     }
 
+    // Mempool fee-rate view.
+    if path == "/mempool" || path == "/mempool.html" {
+        let _ = req.respond(
+            tiny_http::Response::from_string(report::render_mempool_html())
+                .with_header(html_header()),
+        );
+        return;
+    }
+
     // "Support" page + its QR images (donation details loaded from gitignored files).
     if path == "/support" || path == "/support.html" {
         let _ = req.respond(
@@ -262,6 +271,15 @@ fn handle(
                 "clusters": db::read_chain_clusters(conn),
                 "split": db::read_chain_split(conn),
             });
+            serde_json::to_string(&body)
+                .map_err(anyhow::Error::from)
+                .map(|s| (s, json_header()))
+        }
+        // Current mempool snapshot (fee-rate histogram + aggregate stats), for /mempool.
+        // Always 200 with `mempool: null` before the crawler has recorded one, matching
+        // /api/chains — a page with no data yet is not an error.
+        "/api/mempool" => {
+            let body = serde_json::json!({ "mempool": db::read_mempool(conn) });
             serde_json::to_string(&body)
                 .map_err(anyhow::Error::from)
                 .map(|s| (s, json_header()))

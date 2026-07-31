@@ -368,6 +368,9 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
                 last_seen: String::new(),
                 times_seen: 0,
                 online: false,
+                // RPC's getpeerinfo isn't consulted for latency; this placeholder record is
+                // superseded if the crawler also handshakes the peer over P2P (see probe_peer).
+                latency_ms: None,
             };
             own_edges.push(Edge {
                 from: own_label.clone(),
@@ -730,6 +733,22 @@ fn run_cycle(args: &Args, net: NetworkParams, rules: &Arc<Vec<Bip110Rule>>) -> R
                     }
                 }
             }
+            // Mempool refresh: unlike blocks/chain-split, the mempool changes continuously
+            // rather than once per new block, so this runs every tick rather than being
+            // gated on `cached_tip != Some(tip)`.
+            if let (Some(client), Some(dbpath)) = (&rpc, &db_path) {
+                match client.mempool_snapshot() {
+                    Ok(snap) => match db::open(dbpath) {
+                        Ok(c) => {
+                            if let Err(e) = db::write_mempool(&c, &snap) {
+                                eprintln!("[mempool] store failed: {e:#}");
+                            }
+                        }
+                        Err(e) => eprintln!("[mempool] db open failed: {e:#}"),
+                    },
+                    Err(e) => eprintln!("[mempool] snapshot failed: {e:#}"),
+                }
+            }
             let signalling = signal_cache_cb.lock().unwrap().clone();
             // Splice the own node (+ its edges) into the snapshot so the DB the live site
             // reads actually contains it. The post-crawl splice never fires during a
@@ -897,6 +916,7 @@ fn own_node_record(own: &report::OwnNode, rules: &[Bip110Rule]) -> NodeInfo {
         last_seen: String::new(),
         times_seen: 0,
         online: true,
+        latency_ms: None, // not dialed over P2P — it's our own node
     }
 }
 

@@ -44,6 +44,11 @@ pub struct NodeInfo {
     /// single-shot crawls where every listed node was just seen).
     #[serde(default = "default_true")]
     pub online: bool,
+    /// Milliseconds from opening the connection to completing the version/verack handshake,
+    /// from our own crawl of this peer. `None` for nodes we've only heard about via RPC/gossip
+    /// or that failed to handshake — never a guess, only a measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u32>,
 }
 
 fn default_true() -> bool {
@@ -210,11 +215,63 @@ pub struct Aggregates {
     /// Tor (onion) nodes among the counted set. Aggregated over the full set so the
     /// figure is exact even when the node list shown in the report is capped for size.
     pub onion_nodes: usize,
+    /// Handshake-latency histogram, over online nodes with a measured latency. A `Vec` in
+    /// ascending order (not a map) — bucket labels like "100-200ms" don't sort correctly as
+    /// strings ("100-200ms" < "3000ms+" < "50-100ms" lexicographically), so order is carried
+    /// structurally instead. Empty bands are omitted.
+    pub latency_buckets: Vec<LatencyBucket>,
+    /// Median handshake latency (ms) across the same set, or `None` if nothing was measured
+    /// (e.g. no crawl has completed yet, or every node came from RPC/gossip only).
+    pub median_latency_ms: Option<u32>,
+}
+
+/// One band of the handshake-latency histogram: nodes whose measured latency falls in
+/// `[min_ms, max_ms)`. `max_ms` is `None` for the open-ended top band.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencyBucket {
+    pub min_ms: u32,
+    pub max_ms: Option<u32>,
+    pub count: usize,
+}
+
+/// Latency band edges (ms) for the handshake-latency histogram — closer together at the
+/// low end, where most real peers land, and coarser above a second or so.
+const LATENCY_BUCKET_EDGES: &[u32] = &[50, 100, 200, 400, 800, 1500, 3000];
+
+/// Bucket a set of latency measurements into the fixed bands (dropping empty ones) and
+/// report the median alongside. Shared by the in-memory report path (`Aggregates::from_nodes`)
+/// and `db::read_report`, which aggregates straight from SQL instead of a `NodeInfo` slice.
+pub(crate) fn latency_histogram(mut latencies: Vec<u32>) -> (Vec<LatencyBucket>, Option<u32>) {
+    if latencies.is_empty() {
+        return (Vec::new(), None);
+    }
+    latencies.sort_unstable();
+    let median = latencies[latencies.len() / 2];
+
+    let n = LATENCY_BUCKET_EDGES.len();
+    let mut counts = vec![0usize; n + 1];
+    for &ms in &latencies {
+        let idx = LATENCY_BUCKET_EDGES.iter().position(|&e| ms < e).unwrap_or(n);
+        counts[idx] += 1;
+    }
+    let mut buckets = Vec::new();
+    let mut lo = 0;
+    for (i, &count) in counts.iter().enumerate() {
+        let hi = LATENCY_BUCKET_EDGES.get(i).copied();
+        if count > 0 {
+            buckets.push(LatencyBucket { min_ms: lo, max_ms: hi, count });
+        }
+        if let Some(h) = hi {
+            lo = h;
+        }
+    }
+    (buckets, Some(median))
 }
 
 impl Aggregates {
     pub fn from_nodes(nodes: &[NodeInfo]) -> Self {
         let mut agg = Aggregates::default();
+        let mut latencies = Vec::new();
         for n in nodes {
             agg.total_nodes += 1;
             if n.handshaked {
@@ -225,6 +282,11 @@ impl Aggregates {
             }
             if n.addr.contains(".onion") {
                 agg.onion_nodes += 1;
+            }
+            if n.online {
+                if let Some(ms) = n.latency_ms {
+                    latencies.push(ms);
+                }
             }
             *agg.by_implementation.entry(n.implementation.clone()).or_default() += 1;
             let vkey = if n.version.is_empty() {
@@ -240,6 +302,7 @@ impl Aggregates {
             };
             *agg.by_bip110.entry(stance.to_string()).or_default() += 1;
         }
+        (agg.latency_buckets, agg.median_latency_ms) = latency_histogram(latencies);
         agg
     }
 }
@@ -377,6 +440,7 @@ mod tests {
             implementation: "Bitcoin Core".into(), version: String::new(),
             bip110: Bip110Stance::NotEnforcing,
             first_seen: String::new(), last_seen: String::new(), times_seen: 0, online: true,
+            latency_ms: None,
         }
     }
     fn peers_on(hash: &str, n: usize) -> Vec<NodeInfo> {
@@ -480,5 +544,45 @@ mod tests {
         assert_eq!(knots_build_date("/satoshi:25.1.0(knots20240813)/"), Some(20240813));
         assert_eq!(knots_build_date("/satoshi:29.3.0/knots:20260508/"), Some(20260508));
         assert_eq!(knots_build_date("/satoshi:27.1.0/"), None);
+    }
+
+    #[test]
+    fn latency_histogram_buckets_and_reports_the_median() {
+        let (buckets, median) = latency_histogram(vec![30, 45, 90, 180, 5000]);
+        assert_eq!(median, Some(90), "the middle value of 5 sorted samples");
+        assert_eq!(buckets.len(), 4, "empty bands (e.g. 200-400ms) are omitted");
+        // Ascending order, structural (not string-sorted) — this is exactly what would break
+        // if the buckets were a BTreeMap<String, _> keyed by label instead of a Vec.
+        let got: Vec<(u32, Option<u32>, usize)> =
+            buckets.iter().map(|b| (b.min_ms, b.max_ms, b.count)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, Some(50), 2),      // 30, 45
+                (50, Some(100), 1),    // 90
+                (100, Some(200), 1),   // 180
+                (3000, None, 1),       // 5000, open-ended top band
+            ]
+        );
+    }
+
+    #[test]
+    fn latency_histogram_of_nothing_is_nothing() {
+        let (buckets, median) = latency_histogram(vec![]);
+        assert!(buckets.is_empty());
+        assert_eq!(median, None);
+    }
+
+    #[test]
+    fn aggregates_skip_offline_nodes_when_measuring_latency() {
+        // An offline node's latency is from a stale crawl, not a live measurement — including
+        // it would make the network look faster than it currently is.
+        let mut online = peer_on("aaaa");
+        online.latency_ms = Some(50);
+        let mut offline = peer_on("aaaa");
+        offline.online = false;
+        offline.latency_ms = Some(5000);
+        let agg = Aggregates::from_nodes(&[online, offline]);
+        assert_eq!(agg.median_latency_ms, Some(50));
     }
 }

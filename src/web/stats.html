@@ -26,6 +26,7 @@
       <a href="/why">Why BIP-110?</a>
       <a href="/code">Code</a>
       <a href="/blocks">⛓ Blocks</a>
+      <a href="/mempool">🏊 Mempool</a>
       <a href="/chains">🔀 Chains</a>
       <a href="/support">⚡ Support</a>
     </span>
@@ -40,6 +41,20 @@
   </div>
 
   <div class="grid cards" id="cards"><div class="loading">Loading…</div></div>
+
+  <section>
+    <h2>Peer responsiveness</h2>
+    <p class="hint">How long each peer took to complete the P2P handshake with this crawler
+      (connect through <code>verack</code>) — a proxy for round-trip time and how loaded a
+      peer is, not a pure network ping. Measured once per peer per crawl and kept until the
+      next successful re-probe, so a stale figure never gets silently cleared by an
+      unrelated write.</p>
+    <div class="panel">
+      <div class="grid cards" id="latency-cards"></div>
+      <div class="bars" id="chart-latency" style="margin-top:16px;"></div>
+      <div class="bars labels-sm" id="chart-latency-impl" style="margin-top:16px;"></div>
+    </div>
+  </section>
 
   <section>
     <h2>Signal vs noise in the address book</h2>

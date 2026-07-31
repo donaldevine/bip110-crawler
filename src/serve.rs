@@ -185,6 +185,15 @@ fn handle(
         return;
     }
 
+    // Entropy generator: fully static + client-side, no DB/RPC involved.
+    if path == "/entropy" || path == "/entropy.html" {
+        let _ = req.respond(
+            tiny_http::Response::from_string(report::render_entropy_html())
+                .with_header(html_header()),
+        );
+        return;
+    }
+
     // "Support" page + its QR images (donation details loaded from gitignored files).
     if path == "/support" || path == "/support.html" {
         let _ = req.respond(

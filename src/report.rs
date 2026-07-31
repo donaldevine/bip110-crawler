@@ -93,6 +93,14 @@ const BLOCKS_HTML: &str = include_str!("web/blocks.html");
 const BLOCKS_JS: &str = include_str!("web/blocks.js");
 const MEMPOOL_HTML: &str = include_str!("web/mempool.html");
 const MEMPOOL_JS: &str = include_str!("web/mempool.js");
+const ENTROPY_HTML: &str = include_str!("web/entropy.html");
+const ENTROPY_JS: &str = include_str!("web/entropy.js");
+
+/// The canonical BIP-39 English wordlist (2048 entries), fetched from the official
+/// `bitcoin/bips` repository (`bip-0039/english.txt`) rather than transcribed by hand — a
+/// single wrong word would silently corrupt every checksum computed against it. Re-validated
+/// at render time in `render_entropy_html`, not just trusted at commit time.
+const BIP39_WORDLIST_TXT: &str = include_str!("../assets/bip39-english.txt");
 
 /// The live activity ticker, shared by every page (see `web/ticker.js`). It injects its own
 /// element and fetches `/api/ticker` itself, so it works identically on all pages regardless of
@@ -102,14 +110,53 @@ const TICKER_JS: &str = include_str!("web/ticker.js");
 /// The site icon (see `web/favicon.svg`), served at `/favicon.svg` and `/favicon.ico`.
 pub const FAVICON_SVG: &str = include_str!("web/favicon.svg");
 
-/// Assemble a page from its HTML shell: the shared stylesheet at the `<style>` marker, then the
-/// shared ticker followed by the page's own JS at the `<script>` marker.
+/// `(path, label)` for every page, in the order the navbar lists them. One list, so adding a
+/// page here is the only place it needs adding — every HTML shell just carries a
+/// `<!--__NAV__-->` placeholder instead of its own copy of this list.
+const NAV_LINKS: &[(&str, &str)] = &[
+    ("/", "◂ Live crawler"),
+    ("/why", "Why BIP-110?"),
+    ("/code", "Code"),
+    ("/blocks", "⛓ Blocks"),
+    ("/mempool", "🏊 Mempool"),
+    ("/chains", "🔀 Chains"),
+    ("/stats", "📊 Stats"),
+    ("/entropy", "🎲 Entropy"),
+    ("/support", "⚡ Support"),
+];
+
+/// Render the shared nav: a brand mark plus a plain horizontal row of text links (no
+/// buttons/borders — just an underline on hover and on the current page), wrapping onto a
+/// second line on narrow screens rather than hiding behind a toggle. Centralising this in one
+/// function is what keeps pages from drifting the way the old per-page-literal nav did
+/// (`/mempool` once shipped with a stray link to itself).
+fn render_nav(current: &str) -> String {
+    let items: String = NAV_LINKS
+        .iter()
+        .map(|(path, label)| {
+            let class = if *path == current { " class=\"active\"" } else { "" };
+            format!("<a href=\"{path}\"{class}>{label}</a>")
+        })
+        .collect();
+    format!(
+        "<nav>\
+           <span class=\"brand\">▚ BIP-110</span>\
+           <div class=\"nav-links\">{items}</div>\
+         </nav>"
+    )
+}
+
+/// Assemble a page from its HTML shell: the shared stylesheet at the `<style>` marker, the
+/// shared nav at the `<!--__NAV__-->` marker (`current` is that page's own path, for the
+/// active-link highlight), then the shared ticker followed by the page's own JS at the
+/// `<script>` marker.
 ///
 /// The icon link is injected here rather than written into each shell, so every page — present
 /// and future — gets it from one place. Without it browsers request `/favicon.ico` implicitly
 /// and log a 404 on every page load.
-fn assemble(html: &str, js: &str) -> String {
+fn assemble(html: &str, js: &str, current: &str) -> String {
     html.replace("/*__CSS__*/", SITE_CSS)
+        .replace("<!--__NAV__-->", &render_nav(current))
         .replace("/*__JS__*/", &format!("{TICKER_JS}\n{js}"))
         .replace(
             "</head>",
@@ -120,7 +167,7 @@ fn assemble(html: &str, js: &str) -> String {
 /// Inline a JSON payload into the report template. Accepts either compact or
 /// pretty-printed JSON (both are valid JS object literals).
 pub fn render_index_html(json: &str) -> String {
-    assemble(DASH_HTML, DASH_JS)
+    assemble(DASH_HTML, DASH_JS, "/")
         .replace("/*__DATA__*/null", json)
         .replace("/*__WORLD__*/null", WORLD_GEOJSON)
 }
@@ -129,7 +176,7 @@ pub fn render_index_html(json: &str) -> String {
 /// (`/api/report`) instead of inlining data, so it loads instantly at any dataset size.
 pub fn render_api_html() -> String {
     const EMPTY: &str = r#"{"generated_at":"","network":"main","own_node":{"addr":"self","version":0,"subversion":"loading…","implementation":"Unknown","network":"main"},"signalling":null,"aggregates":{"by_implementation":{},"by_version":{},"by_bip110":{},"total_nodes":0,"handshaked_nodes":0,"online_nodes":0},"discovered_total":0,"nodes":[],"edges":[],"live":true,"refresh_seconds":10}"#;
-    assemble(DASH_HTML, DASH_JS)
+    assemble(DASH_HTML, DASH_JS, "/")
         .replace("/*__DATA__*/null", EMPTY)
         .replace("/*__WORLD__*/null", WORLD_GEOJSON)
         .replace("/*__API_URL__*/null", "\"/api/report\"")
@@ -140,38 +187,57 @@ pub fn render_api_html() -> String {
 /// e.g. when opened from `file://`). Quantitative charts use the real crawl data;
 /// conceptual diagrams are explicitly labelled illustrative.
 pub fn render_why_html() -> String {
-    assemble(WHY_HTML, WHY_JS)
+    assemble(WHY_HTML, WHY_JS, "/why")
 }
 
 /// The "BIP-110 code walkthrough" page (served at `/code`): the seven consensus rules
 /// and how they're implemented. Static content, adapted from the Bitcoin Knots
 /// walkthrough (attributed on the page).
 pub fn render_code_html() -> String {
-    assemble(CODE_HTML, "")
+    assemble(CODE_HTML, "", "/code")
 }
 
 /// The "Crawl stats" page (served at `/stats`): crawl-health figures and the population
 /// history, all fetched live from `/api/stats`.
 pub fn render_stats_html() -> String {
-    assemble(STATS_HTML, STATS_JS)
+    assemble(STATS_HTML, STATS_JS, "/stats")
 }
 
 /// Chain view (served at `/chains`): which chain each crawled peer is actually on, from the
 /// per-peer `headers` survey, plus the local `getchaintips` view. Fed by `/api/chains`.
 pub fn render_chains_html() -> String {
-    assemble(CHAINS_HTML, CHAINS_JS)
+    assemble(CHAINS_HTML, CHAINS_JS, "/chains")
 }
 
 /// The block explorer (served at `/blocks`): recent blocks from `/api/blocks`, flagged by
 /// whether they signal BIP-110.
 pub fn render_blocks_html() -> String {
-    assemble(BLOCKS_HTML, BLOCKS_JS)
+    assemble(BLOCKS_HTML, BLOCKS_JS, "/blocks")
 }
 
 /// The mempool view (served at `/mempool`): fee-rate histogram and aggregate stats from the
 /// node's own mempool, fed by `/api/mempool`.
 pub fn render_mempool_html() -> String {
-    assemble(MEMPOOL_HTML, MEMPOOL_JS)
+    assemble(MEMPOOL_HTML, MEMPOOL_JS, "/mempool")
+}
+
+/// The entropy generator (served at `/entropy`): a client-side-only page that mixes the
+/// browser's CSPRNG with hashed mouse/keyboard input into a BIP-39 recovery phrase or raw hex,
+/// for use as extra entropy when creating a hardware wallet. No server-side state at all —
+/// the only thing this function contributes is the wordlist, injected as a JSON array.
+///
+/// Re-validates the wordlist on every call (cheap: 2048 short strings) rather than trusting it
+/// once at commit time, so a future accidental edit to the checked-in asset file fails loudly
+/// instead of silently serving a corrupted wordlist to something generating real wallets.
+pub fn render_entropy_html() -> String {
+    let words: Vec<&str> = BIP39_WORDLIST_TXT.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(words.len(), 2048, "BIP-39 wordlist must have exactly 2048 words");
+    assert!(
+        words.windows(2).all(|w| w[0] < w[1]),
+        "BIP-39 wordlist must be strictly ascending with no duplicates"
+    );
+    let wordlist_json = serde_json::to_string(&words).expect("wordlist always serialises");
+    assemble(ENTROPY_HTML, ENTROPY_JS, "/entropy").replace("/*__WORDLIST__*/null", &wordlist_json)
 }
 
 /// The "Support this project" page (served at `/support`). Addresses and QR image paths
@@ -206,7 +272,7 @@ pub fn render_support_html(
     if cards.is_empty() {
         cards = "<div class=\"notice\">Support isn't configured on this instance.</div>".to_string();
     }
-    assemble(SUPPORT_HTML, SUPPORT_JS)
+    assemble(SUPPORT_HTML, SUPPORT_JS, "/support")
         .replace("<!--__CARDS__-->", &cards)
 }
 
@@ -237,6 +303,60 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guards the exact thing that would silently corrupt every mnemonic checksum computed
+    /// against this list: wrong length, a duplicate, or an out-of-order entry. This is the
+    /// same check `render_entropy_html` runs at request time; this test just runs it without
+    /// needing an HTTP round-trip, and fails the build (not just a live request) if the
+    /// checked-in wordlist is ever wrong.
+    #[test]
+    fn bip39_wordlist_is_exactly_2048_sorted_unique_words() {
+        let words: Vec<&str> = BIP39_WORDLIST_TXT.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(words.len(), 2048);
+        assert!(words.windows(2).all(|w| w[0] < w[1]), "must be strictly ascending, no duplicates");
+        assert!(
+            words.iter().all(|w| w.chars().all(|c| c.is_ascii_lowercase())),
+            "every entry must be pure lowercase ascii"
+        );
+        assert_eq!(words[0], "abandon");
+        assert_eq!(words[2047], "zoo");
+    }
+
+    #[test]
+    fn entropy_page_renders_with_the_wordlist_embedded() {
+        let html = render_entropy_html();
+        assert!(html.contains("\"abandon\""), "wordlist JSON should be spliced into the page");
+        assert!(html.contains("\"zoo\""));
+        assert!(!html.contains("/*__WORDLIST__*/"), "the placeholder must be fully replaced");
+    }
+
+    #[test]
+    fn nav_marks_exactly_the_current_page_active_and_lists_every_page() {
+        let nav = render_nav("/blocks");
+        assert_eq!(nav.matches("class=\"active\"").count(), 1, "exactly one page is ever current");
+        assert!(nav.contains("href=\"/blocks\" class=\"active\""));
+        // Every registered page must appear as a link, or a page could silently vanish from
+        // the menu if NAV_LINKS and the set of served routes ever drifted apart.
+        for (path, _) in NAV_LINKS {
+            assert!(nav.contains(&format!("href=\"{path}\"")), "missing nav link to {path}");
+        }
+    }
+
+    #[test]
+    fn every_page_shell_gets_the_nav_spliced_in_with_no_leftover_placeholder() {
+        // One representative from each render_* family: a plain assemble() call
+        // (render_blocks_html) and the dashboard's index page, which also has DATA/WORLD
+        // markers to fill.
+        for html in [render_blocks_html(), render_index_html("{}")] {
+            assert!(!html.contains("<!--__NAV__-->"), "the nav placeholder must be fully replaced");
+            assert!(html.contains("class=\"nav-links\""), "the actual nav markup must be present");
+        }
+    }
 }
 
 

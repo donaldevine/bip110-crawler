@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Entropy generator · BIP-110</title>
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="BIP-110 entropy generator">
+<meta name="twitter:description" content="Generate extra randomness from your browser's CSPRNG and your own mouse/keyboard input, for mixing into a hardware wallet's seed generation.">
+<meta name="twitter:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="BIP-110 entropy generator">
+<meta property="og:description" content="Generate extra randomness from your browser's CSPRNG and your own mouse/keyboard input, for mixing into a hardware wallet's seed generation.">
+<meta property="og:image" content="https://bip110.xyz/summary_large_image.png">
+<meta property="og:url" content="https://bip110.xyz/entropy">
+<style>
+/*__CSS__*/
+</style>
+</head>
+<body>
+<div class="wrap narrow">
+  <!--__NAV__-->
+
+  <div class="hero">
+    <span class="tag">Entropy generator</span>
+    <h1>Extra randomness for your <span class="accent">hardware wallet</span></h1>
+    <p class="lead">Mixes your browser's cryptographic RNG with your own mouse, touch and
+      keyboard input into a BIP-39 recovery phrase (or raw hex) you can use as an
+      <b>independent, extra</b> entropy source alongside a hardware wallet's own RNG — never
+      trust one RNG alone.</p>
+  </div>
+
+  <div class="callout warn-callout">
+    <b>Read this before you use it.</b>
+    <ul>
+      <li>This is <b>supplementary</b> entropy, not a replacement for anything. Use it as an
+        independent, extra entropy source alongside a hardware wallet's own RNG — never trust
+        a single source, including this page, for a wallet holding real value.</li>
+      <li>This tool is open source and served live from a public website. For anything holding
+        real value: use your browser's "Save Page As → Webpage, HTML only" to get a
+        self-contained file that runs from disk with no server, no connection required (this
+        page has no external scripts) — or better, read the source and build it yourself from
+        <a href="https://github.com/donaldevine/bip110-crawler" target="_blank" rel="noopener">the repo</a>
+        and run it with <code>cargo run -- --serve --db crawl.db</code>, so nothing you use was
+        ever fetched live.</li>
+      <li>Never type a recovery phrase into <b>any</b> website. This page only ever shows you
+        one it generated itself, for you to write down by hand.</li>
+      <li>Ideally disconnect from the network before generating, and definitely before entering
+        anything into a hardware wallet.</li>
+      <li>Nothing here is sent anywhere or saved to disk — check your browser's Network tab if
+        you'd like to confirm that yourself.</li>
+    </ul>
+  </div>
+
+  <section>
+    <h2>1. Add your own randomness</h2>
+    <p class="hint">Move your mouse or finger over the pad below, click around, mash a few keys.
+      This is hashed on top of your browser's own CSPRNG (already cryptographically secure on
+      its own) — think of it as a second, independent ingredient, not the main source of
+      security. The counter below is a deliberately conservative, illustrative estimate of
+      <b>your</b> contribution specifically, and keeps rising for as long as you keep
+      interacting — it's separate from the final key space, which is always exactly fixed at
+      128 or 256 bits by your choice in step 2 (that part genuinely can't grow, however long
+      you interact — a 256-bit value can't hold more than 256 bits of entropy), but every extra
+      independent round you feed in is still a real, additional hedge on top of it.</p>
+    <div class="panel">
+      <canvas id="pad" class="entropy-pad"></canvas>
+      <div class="entropy-progress">
+        <div class="bar-track"><div class="bar-fill" id="progress-fill" style="width:0%"></div></div>
+        <div class="note" id="progress-note">~0 bits of interaction entropy (conservative estimate)</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. Generate</h2>
+    <p class="hint">Pick a length and generate. Either one is guaranteed by your browser's CSPRNG
+      alone, independent of the interaction counter above — that counter is a bonus hedge, not
+      a requirement for reaching full security. The output is blurred until you click to reveal
+      it — so it isn't casually visible on a shared screen or in a screenshot/recording.</p>
+    <div class="panel">
+      <div class="entropy-controls">
+        <label><input type="radio" name="len" value="128" checked> 128-bit · 12 words · key space 2<sup>128</sup></label>
+        <label><input type="radio" name="len" value="256"> 256-bit · 24 words · key space 2<sup>256</sup></label>
+        <button id="generate" class="btn" disabled>Generate</button>
+        <button id="wipe" class="btn">Wipe &amp; start over</button>
+      </div>
+      <div id="output" class="entropy-output" style="display:none;">
+        <h3>Recovery phrase</h3>
+        <p class="hint" style="margin-top:0;">Write this down by hand. There is deliberately no
+          copy button — a seed phrase is designed to be transcribed, and clipboards are readable
+          by other apps.</p>
+        <div class="reveal-wrap" id="reveal-wrap">
+          <div class="reveal-veil" id="reveal-veil">Click to reveal</div>
+          <div class="mnemonic-grid" id="mnemonic-grid"></div>
+        </div>
+        <p class="note" id="checksum-note"></p>
+        <h3>Raw entropy (hex)</h3>
+        <p class="hint" style="margin-top:0;">The same secret, before it was turned into words —
+          for hardware wallets that accept raw/extra entropy directly. Click to reveal.</p>
+        <div class="hexbox" id="hexbox"></div>
+        <button class="btn copy" id="copy-hex" style="margin-top:10px;">Copy hex</button>
+        <p class="note">Clears your clipboard yourself once you've used it — most OSes keep
+          clipboard history other apps can read.</p>
+      </div>
+    </div>
+  </section>
+
+  <p class="disclaimer" id="disclaimer"></p>
+  <footer>bip110.xyz · entropy generation runs entirely in your browser, no network requests</footer>
+</div>
+
+<script>
+/*__JS__*/
+</script>
+</body>
+</html>

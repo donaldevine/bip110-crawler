@@ -27,3 +27,4 @@ crawl-state.json
 *.db-shm
 ne_110m_admin_0_countries.geo.json
 bip110-rules.example.json
+serve_restart.log

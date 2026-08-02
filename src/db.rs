@@ -73,6 +73,20 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Open a connection to an already-initialized database, skipping `open()`'s schema
+/// creation/migration statements. For the `serve` API's per-request connections (see
+/// `serve::serve`): re-running those no-op `CREATE TABLE IF NOT EXISTS`/`ALTER TABLE`
+/// checks on every single request is needless work when `open()` already guaranteed the
+/// schema exists once at startup. `journal_mode`/`synchronous` are still set here because
+/// `synchronous` is a per-connection setting that doesn't persist in the database file the
+/// way `journal_mode` does.
+pub fn connect(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path).with_context(|| format!("opening db {}", path.display()))?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+        .ok();
+    Ok(conn)
+}
+
 /// One-off maintenance: delete long-dead nodes and their orphaned edges, then reclaim the freed
 /// space. **Stop the crawlers before running this** — VACUUM needs an exclusive lock and will
 /// refuse (harmlessly) if another process is writing.

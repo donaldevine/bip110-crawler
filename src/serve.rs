@@ -1,13 +1,31 @@
 //! Tiny embedded HTTP API (`serve` mode). Reads the SQLite DB the crawler writes and
-//! serves the page plus JSON endpoints. No async runtime — a small fixed thread pool of
-//! blocking workers, each with its own read connection.
+//! serves the page plus JSON endpoints. No async runtime: a small number of dispatcher
+//! threads pull requests off tiny_http's internal queue and hand each one to its own
+//! freshly-spawned thread with its own DB connection (see `serve()`), rather than handling
+//! requests inline on a small fixed pool. An earlier version did the latter — 4 workers,
+//! each reusing one long-lived connection — and it went fully unresponsive in production
+//! once (2026-08-02): something made request handling abnormally slow (the working theory
+//! is extreme system memory pressure, not a SQLite lock — rusqlite already sets a 5s
+//! `busy_timeout` on every connection, so lock contention fails fast, it doesn't hang), and
+//! with only 4 fixed workers it took just 4 slow requests to exhaust the pool and wedge
+//! every page, forever, with no way to recover short of restarting the process. Spawning a
+//! thread per request means a slow request can only ever tie up its own thread; capped via
+//! `MAX_IN_FLIGHT` so a burst of slow requests still can't spawn unboundedly many.
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::{db, report};
+
+/// Ceiling on simultaneously-handled requests. Past this, a new request gets an immediate
+/// 503 instead of spawning yet another thread — bounds worst-case resource use during a
+/// traffic burst or a stretch where requests are running abnormally slowly, while staying
+/// generous enough that normal traffic never comes close to it on a personal-scale site.
+const MAX_IN_FLIGHT: usize = 64;
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 /// Social-preview image, embedded so it's served with no external file dependency.
 const OG_IMAGE: &[u8] = include_bytes!("../assets/summary_large_image.png");
@@ -48,6 +66,10 @@ fn load_support() -> Support {
 /// Serve the pages + API from `db_path`. `max_age_secs` is the freshness window: nodes
 /// not confirmed reachable within it are treated as gone (0 disables aging).
 pub fn serve(db_path: &Path, port: u16, max_age_secs: u64) -> Result<()> {
+    // Ensure the schema exists/is migrated up front — every per-request connection below
+    // uses the lighter `db::connect`, which deliberately skips that check.
+    db::open(db_path).map_err(|e| anyhow!("opening {}: {e:#}", db_path.display()))?;
+
     let server = tiny_http::Server::http(("127.0.0.1", port))
         .map_err(|e| anyhow!("binding 127.0.0.1:{port}: {e}"))?;
     let server = Arc::new(server);
@@ -61,27 +83,46 @@ pub fn serve(db_path: &Path, port: u16, max_age_secs: u64) -> Result<()> {
     );
     eprintln!("[serve] point your Cloudflare tunnel at this port.");
 
+    // A handful of dispatcher threads just pull requests off tiny_http's internal queue and
+    // hand each one to its own short-lived thread — see the module doc for why nothing here
+    // is handled inline on this fixed pool.
     let mut handles = Vec::new();
     for _ in 0..4 {
         let server = Arc::clone(&server);
         let page = Arc::clone(&page);
         let support = Arc::clone(&support);
         let db_path = db_path.to_path_buf();
-        handles.push(std::thread::spawn(move || {
-            // Each worker gets its own connection (rusqlite Connection isn't Sync).
-            let conn = match db::open(&db_path) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("[serve] worker db open failed: {e:#}");
-                    return;
-                }
+        handles.push(std::thread::spawn(move || loop {
+            let req = match server.recv() {
+                Ok(req) => req,
+                Err(_) => break,
             };
-            loop {
-                match server.recv() {
-                    Ok(req) => handle(&conn, &page, &support, max_age_secs, req),
-                    Err(_) => break,
-                }
+
+            if IN_FLIGHT.fetch_add(1, Ordering::SeqCst) >= MAX_IN_FLIGHT {
+                IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+                let _ = req.respond(
+                    tiny_http::Response::from_string("server busy, try again shortly")
+                        .with_status_code(503),
+                );
+                continue;
             }
+
+            let page = Arc::clone(&page);
+            let support = Arc::clone(&support);
+            let db_path = db_path.clone();
+            std::thread::spawn(move || {
+                match db::connect(&db_path) {
+                    Ok(conn) => handle(&conn, &page, &support, max_age_secs, req),
+                    Err(e) => {
+                        eprintln!("[serve] request db open failed: {e:#}");
+                        let _ = req.respond(
+                            tiny_http::Response::from_string(format!("db error: {e:#}"))
+                                .with_status_code(500),
+                        );
+                    }
+                }
+                IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            });
         }));
     }
     for h in handles {

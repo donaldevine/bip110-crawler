@@ -113,9 +113,22 @@ function renderSignalling(){
 //  - lock-in is guaranteed no later than 963648
 //  - ACTIVE follows one retarget later (965664); the fork EXPIRES active_duration
 //    (52416 blocks, ~1 year) after that, lifting the data limits.
+// D HH:MM:SS (or HH:MM:SS under a day) — purely for the live ticker between data refreshes;
+// the underlying target is a ~10min/block estimate, so this is illustrative, not a promise.
+function formatDuration(ms){
+  let s = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(s / 86400); s -= days * 86400;
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60); s -= m * 60;
+  const pad = n => String(n).padStart(2, "0");
+  return (days > 0 ? `${days}d ` : "") + `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+let timelineTicker = null; // re-armed on every renderTimeline() call, so a stale interval never outlives its target
+
 function renderTimeline(){
   const el = document.getElementById("timeline-panel");
   if (!el) return;
+  if (timelineTicker){ clearInterval(timelineTicker); timelineTicker = null; }
   const MANDATORY_START = 961632, LOCKIN = 963648, RETARGET = 2016, ACTIVE_DURATION = 52416;
   const ACTIVE = LOCKIN + RETARGET, EXPIRED = ACTIVE + ACTIVE_DURATION;
   const sig = DATA.signalling;
@@ -136,17 +149,22 @@ function renderTimeline(){
     { h: EXPIRED,         t:"Expires (temporary)",          d:`~1 year (${fmt(ACTIVE_DURATION)} blocks) after activation → limits lifted` },
   ];
 
-  let headline;
+  let headline, tickerTarget = null;
   if (tip == null){
     headline = `<div class="cd"><div class="cd-sub">Connect the crawler to your node (RPC) to show a live block-countdown from the chain tip.</div></div>`;
   } else {
     const next = milestones.find(m => m.h > tip);
-    headline = next
-      ? `<div class="cd"><div class="cd-big">${fmt(next.h - tip)}<small> blocks</small></div>`
+    if (next){
+      tickerTarget = Date.now() + (next.h - tip) * 10 * 60 * 1000;
+      headline = `<div class="cd"><div class="cd-big">${fmt(next.h - tip)}<small> blocks</small></div>`
         + `<div class="cd-sub">to <b>${esc(next.t)}</b> · ${human(next.h - tip)} · est. ${etaDate(next.h - tip)}</div>`
-        + `<div class="cd-note">chain tip ${fmt(tip)}</div></div>`
-      : `<div class="cd"><div class="cd-big">Expired</div><div class="cd-sub">the temporary soft fork has ended — data limits lifted</div>`
+        + `<div class="cd-ticker" id="cd-ticker"></div>`
+        + `<div class="cd-note">chain tip ${fmt(tip)} · the ticker above just counts down the estimate in real `
+        + `time between refreshes — actual block times vary, so it's not accurate to the second or minute</div></div>`;
+    } else {
+      headline = `<div class="cd"><div class="cd-big">Expired</div><div class="cd-sub">the temporary soft fork has ended — data limits lifted</div>`
         + `<div class="cd-note">chain tip ${fmt(tip)}</div></div>`;
+    }
   }
 
   const nextH = tip == null ? null : (milestones.find(m => m.h > tip) || {}).h;
@@ -160,6 +178,13 @@ function renderTimeline(){
   }).join("");
 
   el.innerHTML = headline + `<div class="timeline">${nodes}</div>`;
+
+  if (tickerTarget != null){
+    const tickerEl = document.getElementById("cd-ticker");
+    const tick = () => { tickerEl.textContent = formatDuration(tickerTarget - Date.now()); };
+    tick();
+    timelineTicker = setInterval(tick, 1000);
+  }
 }
 
 function barChart(elId, entries, colorFn){

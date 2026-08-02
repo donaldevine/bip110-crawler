@@ -361,6 +361,8 @@ td { color:var(--ink-2); }
 .cd-big small { font-size:16px; color:var(--ink-2); font-weight:500; text-shadow:none; }
 .cd-sub { color:var(--ink); font-size:14px; margin-top:8px; }
 .cd-sub b { color:var(--neon); }
+.cd-ticker { font-family:var(--mono); font-size:clamp(18px,2.6vw,24px); font-weight:700; color:var(--ink-2);
+  margin-top:10px; letter-spacing:.03em; }
 .cd-note { color:var(--muted); font-size:12px; font-family:var(--mono); margin-top:4px; }
 .timeline { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; position:relative; }
 @media (max-width:720px){ .timeline { grid-template-columns:1fr 1fr; row-gap:26px; } }
